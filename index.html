@@ -241,6 +241,9 @@
       <canvas class="scope" id="listenScope"></canvas>
 
       <div class="status-row"><div class="dot" id="listenDot"></div><span id="listenStatus">Not listening.</span></div>
+      <div class="status-row" id="diagRow" style="display:none;">
+        <span style="color:var(--teal);">Loudest sound:</span> <span id="diagFreq">—</span>
+      </div>
 
       <button class="primary" id="listenBtn">🎙 Start listening</button>
 
@@ -260,6 +263,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
+    <div style="margin-top:10px; color:#5a4f40;">Build: 2026-08-05 21:40 UTC · v6 (high-frequency tone range)</div>
   </footer>
 </div>
 
@@ -464,6 +468,19 @@
     return best;
   }
 
+  // For diagnostics: find the single loudest bin anywhere in a broad audible
+  // range, regardless of whether it matches one of our known candidate tones.
+  function findGlobalPeak(freqDataDb, sampleRate, fftSize, minHz, maxHz){
+    const binWidth = sampleRate / fftSize;
+    const minBin = Math.max(1, Math.floor(minHz / binWidth));
+    const maxBin = Math.min(freqDataDb.length - 1, Math.ceil(maxHz / binWidth));
+    let bestBin = minBin, bestDb = -Infinity;
+    for (let i = minBin; i <= maxBin; i++){
+      if (freqDataDb[i] > bestDb){ bestDb = freqDataDb[i]; bestBin = i; }
+    }
+    return { freq: Math.round(bestBin * binWidth), db: bestDb };
+  }
+
   function classifyPeak(freqDataDb, sampleRate, fftSize, noiseFloor){
     let bestFreq = null, bestExcess = -Infinity, secondExcess = -Infinity;
     for (const f of ALL_CANDIDATES){
@@ -632,6 +649,9 @@
     const noiseFloor = await calibrateNoiseFloor(listenAnalyser, sampleRate, fftSize, 500, () => listening);
     if (!listening || !noiseFloor) return; // stopped during calibration
     statusEl.textContent = "Listening for a signal…";
+    document.getElementById("diagRow").style.display = "flex";
+    const diagFreqEl = document.getElementById("diagFreq");
+    let lastDiagUpdate = 0;
 
     let state = "idle"; // idle -> markerSustain -> reading
     let armedSince = 0;
@@ -692,6 +712,13 @@
       const peak = classifyPeak(dataArray, sampleRate, fftSize, noiseFloor);
       const now = performance.now();
 
+      if (now - lastDiagUpdate > 200){
+        lastDiagUpdate = now;
+        const g = findGlobalPeak(dataArray, sampleRate, fftSize, 100, 4000);
+        const isKnown = peak ? ` — recognized as ${Math.round(peak.freq)}Hz` : "";
+        diagFreqEl.textContent = `${g.freq}Hz (${g.db.toFixed(0)}dB)${isKnown}`;
+      }
+
       if (state === "idle"){
         if (peak && peak.freq === MARKER_START){
           if (!armedSince) armedSince = now;
@@ -751,6 +778,7 @@
     document.getElementById("listenBtn").textContent = "🎙 Start listening";
     document.getElementById("listenStatus").textContent = "Not listening.";
     document.getElementById("listenDot").classList.remove("on");
+    document.getElementById("diagRow").style.display = "none";
   }
 
   /* =============================== WIRING =============================== */
