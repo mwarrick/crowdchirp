@@ -196,6 +196,9 @@
   </header>
 
   <div class="stage-line"><div class="dash"></div> STAGE&nbsp;&nbsp;→&nbsp;&nbsp;AIR&nbsp;&nbsp;→&nbsp;&nbsp;AUDIENCE <div class="dash"></div></div>
+  <div style="text-align:center; margin: -6px 0 22px;">
+    <button class="secondary" id="resetBtn" type="button">↺ Reset session</button>
+  </div>
 
   <div class="split">
     <!-- SENDER -->
@@ -296,7 +299,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:00 UTC · v27 (symbol-center decode + END off START freq)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:10 UTC · v28 (reset button + ~25% faster symbols)</div>
   </footer>
 </div>
 
@@ -329,16 +332,20 @@
   const MARKER_END_HIGH = 1800;
   // END is a dual-tone chord (700+1800). Both partials must be present.
 
-  const SYMBOL_MS  = 130;   // tone duration per nibble
-  const GAP_MS     = 70;    // silence between symbols — long enough for typical room echo/reverb to decay before the next tone is judged
-  const MARKER_MS  = 280;   // marker hold — long enough to lock, short enough to provoke less mic AGC
-  const MARKER_GAP_MS = 90; // silence after END marker
+  // v28: 100+50=150ms/symbol (was 130+70=200ms). Center-gated decode + first-symbol
+  // lock made this viable; keep post-START settle unchanged — that's AGC, not bitrate.
+  const SYMBOL_MS  = 100;   // tone duration per nibble
+  const GAP_MS     = 50;    // silence between symbols for room echo/reverb decay
+  const MARKER_MS  = 260;   // marker hold — long enough to lock
+  const MARKER_GAP_MS = 80; // silence after END marker
   // Extra silence after START only. Phones often still run hardware/OS AGC even when
   // getUserMedia asks for autoGainControl:false; a loud sustained marker dips gain and
   // the first ~1–2s of data get distorted until it settles. Settle here — not between
   // every symbol — so early nibbles (esp. length byte) aren't decoded during that window.
   const MARKER_SETTLE_MS = 450;
-  const REPEAT_GAP_MS = 500;
+  const REPEAT_GAP_MS = 400;
+  const TONE_GATE_START_MS = 20;                 // ignore attack edge when scoring a symbol
+  const TONE_GATE_END_MS = SYMBOL_MS - 12;       // ignore release / gap bleed
   const DATA_GAIN = 0.28;
   const MARKER_START_GAIN = 0.11; // ~8dB quieter than data — less AGC kick from START
   const MARKER_END_GAIN_EACH = 0.14; // per partial; two together ≈ data loudness without clipping
@@ -1026,7 +1033,7 @@
           // gap / next-symbol edge was duplicating each byte's low nibble
           // (0x48→0x88, 0x54→0x55, etc.) and corrupting the length byte.
           const phase = elapsed - currentWindowIdx * symbolPeriod;
-          const inToneCenter = phase >= 25 && phase <= SYMBOL_MS - 15;
+          const inToneCenter = phase >= TONE_GATE_START_MS && phase <= TONE_GATE_END_MS;
           if (endHit && !endLogged){
             endLogged = true;
             logLine("listenLog", `${relT(now)}  ✓ heard END chord (${Math.round(MARKER_END_LOW)}+${Math.round(MARKER_END_HIGH)}Hz, ${endHit.db.toFixed(0)}dB)`, "hl");
@@ -1043,27 +1050,74 @@
     tick();
   }
 
-  function stopListening(){
+  function stopListening(opts = {}){
+    const { keepDiag = true } = opts;
     listening = false;
     if (decodeRaf) cancelAnimationFrame(decodeRaf);
+    decodeRaf = null;
     if (listenRaf.id) cancelAnimationFrame(listenRaf.id);
+    listenRaf.id = null;
     if (micStream) micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
     if (listenCtx) listenCtx.close();
+    listenCtx = null;
+    listenAnalyser = null;
     document.getElementById("listenBtn").textContent = "🎙 Start listening";
     document.getElementById("listenStatus").textContent = "Not listening.";
     document.getElementById("listenDot").classList.remove("on");
 
     const diagRow = document.getElementById("diagRow");
     const diagFreqEl = document.getElementById("diagFreq");
-    if (lastSessionPeak && lastSessionPeak.freq !== null){
+    if (keepDiag && lastSessionPeak && lastSessionPeak.freq !== null){
       const recognizedText = lastSessionPeak.recognized
         ? ` — recognized as ${lastSessionPeak.recognized}Hz`
         : " — not recognized as any known tone";
       diagFreqEl.textContent = `Peak this session: ${lastSessionPeak.freq}Hz (${lastSessionPeak.db.toFixed(0)}dB)${recognizedText}`;
       diagRow.style.display = "flex";
     } else {
+      diagFreqEl.textContent = "—";
       diagRow.style.display = "none";
+      lastSessionPeak = null;
     }
+  }
+
+  function clearScope(canvas){
+    const ctx2d = canvas.getContext("2d");
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  // Soft reset — stop audio I/O and clear session UI without a full page reload
+  // (keeps the typed message, repeat count, and saved history).
+  function resetSession(){
+    if (isBroadcasting) stopBroadcast();
+    if (listening) stopListening({ keepDiag: false });
+    else {
+      document.getElementById("listenStatus").textContent = "Not listening.";
+      document.getElementById("listenDot").classList.remove("on");
+      document.getElementById("diagFreq").textContent = "—";
+      document.getElementById("diagRow").style.display = "none";
+      lastSessionPeak = null;
+    }
+
+    const player = document.getElementById("sendPlayer");
+    player.pause();
+    player.removeAttribute("src");
+    player.load();
+    if (currentBlobUrl){ URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
+
+    document.getElementById("sendLog").innerHTML = "";
+    document.getElementById("listenLog").innerHTML = "";
+    const resultEl = document.getElementById("resultCard");
+    resultEl.textContent = "Nothing received yet.";
+    resultEl.className = "result-card empty";
+
+    document.getElementById("sendStatus").textContent = "Ready to broadcast.";
+    document.getElementById("sendDot").classList.remove("on");
+    document.getElementById("broadcastBtn").textContent = "▶ Broadcast";
+    document.getElementById("listenBtn").textContent = "🎙 Start listening";
+
+    clearScope(document.getElementById("sendScope"));
+    clearScope(document.getElementById("listenScope"));
   }
 
   /* =============================== WIRING =============================== */
@@ -1124,6 +1178,10 @@
 
   document.getElementById("listenBtn").addEventListener("click", () => {
     if (listening) stopListening(); else startListening();
+  });
+
+  document.getElementById("resetBtn").addEventListener("click", () => {
+    resetSession();
   });
 
   document.getElementById("clearHistoryBtn").addEventListener("click", async () => {
