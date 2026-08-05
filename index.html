@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Signal — audio data broadcast prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;900&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #14110d;
+    --panel: #1c1712;
+    --panel-raised: #241d16;
+    --line: #35291d;
+    --amber: #e8a13a;
+    --amber-dim: #7a5a24;
+    --teal: #4fd1c0;
+    --text: #f2ece0;
+    --text-dim: #a8998459;
+    --muted: #9c8d79;
+    --bad: #d9694f;
+  }
+  *{ box-sizing: border-box; }
+  html,body{ margin:0; height:100%; }
+  body{
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #2a2013 0%, transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap{ max-width: 1180px; margin: 0 auto; padding: 36px 20px 60px; }
+
+  header{ text-align:center; margin-bottom: 34px; }
+  header .eyebrow{
+    font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    font-size: 11px;
+    color: var(--amber);
+    margin-bottom: 10px;
+  }
+  header h1{
+    font-family: 'Fraunces', serif;
+    font-weight: 900;
+    font-size: clamp(28px, 5vw, 46px);
+    margin: 0 0 10px;
+    letter-spacing: -0.01em;
+  }
+  header p{
+    color: var(--muted);
+    max-width: 620px;
+    margin: 0 auto;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+
+  .stage-line{
+    display:flex; align-items:center; gap: 14px;
+    justify-content:center; margin: 26px 0 30px;
+    color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; font-size: 12px;
+  }
+  .stage-line .dash{ height:1px; width: 80px; background: linear-gradient(90deg, transparent, var(--line), transparent); }
+
+  .split{
+    display:grid;
+    grid-template-columns: 1fr 1px 1fr;
+    gap: 0;
+    align-items: stretch;
+  }
+  .divider{
+    background: linear-gradient(180deg, transparent, var(--line) 15%, var(--line) 85%, transparent);
+    position: relative;
+  }
+  .divider::before, .divider::after{
+    content: attr(data-arrow);
+  }
+  @media (max-width: 860px){
+    .split{ grid-template-columns: 1fr; }
+    .divider{ display:none; }
+  }
+
+  .panel{
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 26px 24px 24px;
+    display:flex; flex-direction:column; gap: 18px;
+  }
+  .split > .panel:first-child{ margin-right: 22px; }
+  .split > .panel:last-child{ margin-left: 22px; }
+  @media (max-width: 860px){
+    .split > .panel{ margin: 0 0 20px !important; }
+  }
+
+  .panel-label{
+    display:flex; align-items:center; justify-content:space-between;
+  }
+  .panel-label .tag{
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px; letter-spacing: 0.14em; text-transform:uppercase;
+    color: var(--muted);
+  }
+  .panel h2{
+    font-family: 'Fraunces', serif;
+    font-size: 24px; margin: 4px 0 2px; font-weight:600;
+  }
+  .panel .sub{ color: var(--muted); font-size: 13.5px; line-height:1.5; margin:0; }
+
+  label.field-label{
+    font-size: 12px; color: var(--muted); font-family:'IBM Plex Mono', monospace;
+    letter-spacing: 0.04em; display:block; margin-bottom:7px;
+  }
+  input[type=text]{
+    width:100%; background: var(--panel-raised); border:1px solid var(--line);
+    color: var(--text); padding: 12px 14px; border-radius:9px; font-size:15px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  input[type=text]:focus{ outline: 2px solid var(--amber); outline-offset: 1px; }
+  .char-count{ font-size:11px; color: var(--text-dim); text-align:right; margin-top:5px; font-family:'IBM Plex Mono',monospace;}
+
+  .repeat-row{ display:flex; gap:8px; flex-wrap:wrap; }
+  .repeat-btn{
+    background: var(--panel-raised); border:1px solid var(--line); color: var(--muted);
+    padding: 8px 14px; border-radius: 20px; font-family:'IBM Plex Mono', monospace;
+    font-size: 13px; cursor:pointer; transition: all .15s ease;
+  }
+  .repeat-btn.active{ border-color: var(--amber); color: var(--amber); background: #2c2013; }
+  .repeat-btn:hover{ border-color: var(--amber-dim); }
+  .repeat-btn:focus-visible{ outline: 2px solid var(--amber); outline-offset:2px; }
+
+  button.primary{
+    background: var(--amber); color: #1a1409; border:none; font-weight:600;
+    font-size: 15px; padding: 13px 20px; border-radius: 10px; cursor:pointer;
+    font-family:'Inter',sans-serif; transition: transform .12s ease, box-shadow .12s ease;
+  }
+  button.primary:hover:not(:disabled){ box-shadow: 0 6px 18px -4px #e8a13a55; transform: translateY(-1px); }
+  button.primary:disabled{ opacity:.5; cursor:not-allowed; }
+  button.primary:focus-visible{ outline: 2px solid var(--text); outline-offset:2px; }
+
+  button.secondary{
+    background:transparent; border:1px solid var(--line); color: var(--muted);
+    padding: 10px 16px; border-radius:10px; font-size:13px; cursor:pointer; font-family:'Inter',sans-serif;
+  }
+  button.secondary:hover{ color:var(--text); border-color:var(--amber-dim); }
+
+  canvas.scope{ width:100%; height:84px; border-radius:9px; background:#0f0c08; border:1px solid var(--line); display:block; }
+
+  .status-row{ display:flex; align-items:center; gap:10px; font-family:'IBM Plex Mono', monospace; font-size:12.5px; color: var(--muted); min-height: 18px;}
+  .dot{ width:8px; height:8px; border-radius:50%; background: var(--line); flex-shrink:0; }
+  .dot.on{ background: var(--teal); box-shadow: 0 0 8px 1px #4fd1c088; }
+  .dot.warn{ background: var(--bad); }
+
+  .result-card{
+    background: var(--panel-raised); border:1px solid var(--line); border-radius:10px;
+    padding: 14px 16px; font-family:'IBM Plex Mono', monospace; font-size: 14px;
+    min-height: 22px; word-break: break-word;
+  }
+  .result-card.empty{ color: var(--text-dim); font-style: italic; }
+
+  .history{ display:flex; flex-direction:column; gap:8px; max-height: 220px; overflow-y:auto; }
+  .history-item{
+    display:flex; justify-content:space-between; gap:10px;
+    background: var(--panel-raised); border:1px solid var(--line); border-radius:8px;
+    padding: 9px 12px; font-size: 13px; font-family:'IBM Plex Mono', monospace;
+  }
+  .history-item time{ color: var(--text-dim); font-size:11px; white-space:nowrap; }
+  .history-empty{ color: var(--text-dim); font-size:12.5px; font-style:italic; }
+
+  details.legend{ font-size:13px; color: var(--muted); }
+  details.legend summary{ cursor:pointer; color: var(--teal); font-family:'IBM Plex Mono', monospace; font-size:12px; letter-spacing:.03em;}
+  details.legend p{ line-height:1.6; margin: 10px 0 0; }
+
+  footer{ text-align:center; margin-top: 40px; color: var(--text-dim); font-size:12px; font-family:'IBM Plex Mono', monospace; }
+  footer a{ color: var(--amber); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Prototype · data over sound</div>
+    <h1>Signal</h1>
+    <p>Type a short message, broadcast it as a burst of musical tones through your speaker, and decode it back to text on another device (or tab) listening with its microphone. No accounts, no server — everything happens live in the browser.</p>
+  </header>
+
+  <div class="stage-line"><div class="dash"></div> STAGE&nbsp;&nbsp;→&nbsp;&nbsp;AIR&nbsp;&nbsp;→&nbsp;&nbsp;AUDIENCE <div class="dash"></div></div>
+
+  <div class="split">
+    <!-- SENDER -->
+    <section class="panel">
+      <div class="panel-label">
+        <div>
+          <span class="tag">01 · Broadcast</span>
+          <h2>On stage</h2>
+        </div>
+      </div>
+      <p class="sub">Encodes your text into a sequence of tones (a short pentatonic melody, not a harsh chirp) and plays it through your speaker.</p>
+
+      <div>
+        <label class="field-label" for="msgInput">MESSAGE (max 20 characters)</label>
+        <input type="text" id="msgInput" maxlength="20" placeholder="e.g. WELCOME2026" value="HELLO">
+        <div class="char-count"><span id="charCount">5</span>/20</div>
+      </div>
+
+      <div>
+        <label class="field-label">REPEAT COUNT</label>
+        <div class="repeat-row" id="repeatRow">
+          <button class="repeat-btn" data-r="1">Once</button>
+          <button class="repeat-btn active" data-r="3">3×</button>
+          <button class="repeat-btn" data-r="5">5×</button>
+          <button class="repeat-btn" data-r="10">10×</button>
+        </div>
+      </div>
+
+      <canvas class="scope" id="sendScope"></canvas>
+
+      <div class="status-row"><div class="dot" id="sendDot"></div><span id="sendStatus">Ready to broadcast.</span></div>
+
+      <button class="primary" id="broadcastBtn">▶ Broadcast</button>
+
+      <details class="legend" id="senderDetails">
+        <summary>How the encoding works</summary>
+        <p>Your text is converted to bytes, wrapped with a length header and a checksum, then split into 4-bit chunks. Each chunk becomes one of 16 tones drawn from a pentatonic scale (so sequences land as an arpeggio, not random beeps). A low marker tone signals "start", a different low tone signals "end". Repeats give listeners in a noisy room more chances to catch a clean pass.</p>
+      </details>
+    </section>
+
+    <div class="divider" data-arrow=""></div>
+
+    <!-- RECEIVER -->
+    <section class="panel">
+      <div class="panel-label">
+        <div>
+          <span class="tag">02 · Listen</span>
+          <h2>In the crowd</h2>
+        </div>
+      </div>
+      <p class="sub">Uses your microphone to listen for the tone sequence and decodes it back into text, locally, on this device.</p>
+
+      <canvas class="scope" id="listenScope"></canvas>
+
+      <div class="status-row"><div class="dot" id="listenDot"></div><span id="listenStatus">Not listening.</span></div>
+
+      <button class="primary" id="listenBtn">🎙 Start listening</button>
+
+      <div>
+        <label class="field-label">LAST DECODED MESSAGE</label>
+        <div class="result-card empty" id="resultCard">Nothing received yet.</div>
+      </div>
+
+      <div>
+        <label class="field-label">HISTORY (saved on this device)</label>
+        <div class="history" id="historyList"><div class="history-empty">No messages received yet.</div></div>
+        <button class="secondary" id="clearHistoryBtn" style="margin-top:8px;">Clear history</button>
+      </div>
+    </section>
+  </div>
+
+  <footer>
+    Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
+    If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
+  </footer>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  /* ============================= PROTOCOL ============================= */
+  // 16 data tones, drawn from a major-pentatonic pattern across ~3 octaves
+  // starting at C4, so a decoded sequence sounds like a little melody
+  // rather than a modem screech.
+  const ROOT = 261.63; // C4
+  const PENTATONIC_OFFSETS = [0,2,4,7,9, 12,14,16,19,21, 24,26,28,31,33,36];
+  const DATA_FREQS = PENTATONIC_OFFSETS.map(semi => ROOT * Math.pow(2, semi/12));
+
+  const MARKER_START = 196.00; // G3 — below the data range, easy to tell apart
+  const MARKER_END   = 130.81; // C3 — far enough from MARKER_START that FFT bins don't overlap
+
+  const SYMBOL_MS  = 130;   // tone duration per nibble
+  const GAP_MS     = 20;    // silence between symbols (helps edge detection)
+  const MARKER_MS  = 350;   // marker tones held longer for reliable lock
+  const MARKER_GAP_MS = 60;
+  const REPEAT_GAP_MS = 500;
+
+  function textToFrame(text){
+    const payload = new TextEncoder().encode(text);
+    if (payload.length > 40) throw new Error("Message too long");
+    let checksum = 0;
+    for (const b of payload) checksum = (checksum + b) & 0xFF;
+    const frame = new Uint8Array(payload.length + 2);
+    frame[0] = payload.length;
+    frame.set(payload, 1);
+    frame[frame.length - 1] = checksum;
+    return frame;
+  }
+
+  function bytesToNibbles(bytes){
+    const out = [];
+    for (const b of bytes){ out.push((b >> 4) & 0xF); out.push(b & 0xF); }
+    return out;
+  }
+
+  function nibblesToBytes(nibbles){
+    const out = new Uint8Array(nibbles.length / 2);
+    for (let i = 0; i < out.length; i++){
+      out[i] = (nibbles[i*2] << 4) | nibbles[i*2+1];
+    }
+    return out;
+  }
+
+  /* ============================== SENDER =============================== */
+  let sendCtx = null;
+  let sendAnalyser = null;
+  let isBroadcasting = false;
+  let activeBroadcast = null; // { nodes: [{osc,gain}], resolveEarly }
+
+  function scheduleTone(ctx, dest, freq, startTime, durationSec, nodeList){
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.frequency.value = freq;
+    osc.type = "sine";
+    const attack = 0.008, release = 0.012;
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(0.28, startTime + attack);
+    gain.gain.setValueAtTime(0.28, startTime + durationSec - release);
+    gain.gain.linearRampToValueAtTime(0, startTime + durationSec);
+    osc.connect(gain).connect(dest);
+    osc.start(startTime);
+    osc.stop(startTime + durationSec + 0.02);
+    if (nodeList) nodeList.push({ osc, gain });
+  }
+
+  function stopBroadcast(){
+    if (!activeBroadcast) return;
+    const now = sendCtx.currentTime;
+    for (const { osc, gain } of activeBroadcast.nodes){
+      try{
+        gain.gain.cancelScheduledValues(now);
+        gain.gain.setValueAtTime(gain.gain.value, now);
+        gain.gain.linearRampToValueAtTime(0, now + 0.03);
+        osc.stop(now + 0.04);
+      } catch(e){ /* already stopped */ }
+    }
+    document.getElementById("sendStatus").textContent = "Stopped.";
+    if (activeBroadcast.resolveEarly) activeBroadcast.resolveEarly();
+    activeBroadcast = null;
+  }
+
+  function drawScopeFrom(analyser, canvas, rafHolder){
+    const ctx2d = canvas.getContext("2d");
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+    function draw(){
+      rafHolder.id = requestAnimationFrame(draw);
+      analyser.getByteFrequencyData(buf);
+      const w = canvas.width, h = canvas.height;
+      ctx2d.clearRect(0,0,w,h);
+      const barCount = 64;
+      const step = Math.floor(buf.length / barCount);
+      for (let i=0;i<barCount;i++){
+        const v = buf[i*step] / 255;
+        const bh = v * h;
+        ctx2d.fillStyle = "#e8a13a";
+        ctx2d.globalAlpha = 0.25 + v*0.75;
+        ctx2d.fillRect(i*(w/barCount), h-bh, (w/barCount)-2, bh);
+      }
+      ctx2d.globalAlpha = 1;
+    }
+    draw();
+  }
+
+  function resizeCanvas(c){
+    const rect = c.getBoundingClientRect();
+    c.width = rect.width * devicePixelRatio;
+    c.height = rect.height * devicePixelRatio;
+  }
+
+  const sendScopeEl = document.getElementById("sendScope");
+  const sendRaf = { id: null };
+  resizeCanvas(sendScopeEl);
+  window.addEventListener("resize", () => resizeCanvas(sendScopeEl));
+
+  async function broadcast(text, repeats){
+    if (isBroadcasting) return;
+    isBroadcasting = true;
+    const btn = document.getElementById("broadcastBtn");
+    const statusEl = document.getElementById("sendStatus");
+    const dotEl = document.getElementById("sendDot");
+    btn.textContent = "⏹ Stop";
+    dotEl.classList.add("on");
+
+    try{
+      const frame = textToFrame(text);
+      const nibbles = bytesToNibbles(frame);
+
+      if (!sendCtx) sendCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (sendCtx.state === "suspended") await sendCtx.resume();
+
+      sendAnalyser = sendCtx.createAnalyser();
+      sendAnalyser.fftSize = 1024;
+      const masterGain = sendCtx.createGain();
+      masterGain.gain.value = 1;
+      masterGain.connect(sendCtx.destination);
+      masterGain.connect(sendAnalyser);
+      drawScopeFrom(sendAnalyser, sendScopeEl, sendRaf);
+
+      const nodes = [];
+      activeBroadcast = { nodes, resolveEarly: null };
+
+      let t = sendCtx.currentTime + 0.1;
+      const symbolPeriod = (SYMBOL_MS + GAP_MS) / 1000;
+      const markerPeriod = (MARKER_MS + MARKER_GAP_MS) / 1000;
+      const totalPerRepeat = markerPeriod*2 + nibbles.length*symbolPeriod;
+      const totalSec = totalPerRepeat*repeats + (REPEAT_GAP_MS/1000)*(repeats-1);
+
+      statusEl.textContent = `Broadcasting "${text}" · ~${totalSec.toFixed(1)}s total`;
+
+      for (let r=0; r<repeats; r++){
+        scheduleTone(sendCtx, masterGain, MARKER_START, t, MARKER_MS/1000, nodes);
+        t += markerPeriod;
+        for (const nib of nibbles){
+          scheduleTone(sendCtx, masterGain, DATA_FREQS[nib], t, SYMBOL_MS/1000, nodes);
+          t += symbolPeriod;
+        }
+        scheduleTone(sendCtx, masterGain, MARKER_END, t, MARKER_MS/1000, nodes);
+        t += markerPeriod;
+        if (r < repeats-1) t += REPEAT_GAP_MS/1000;
+      }
+
+      await new Promise(resolve => {
+        const id = setTimeout(resolve, totalSec*1000 + 150);
+        if (activeBroadcast) activeBroadcast.resolveEarly = () => { clearTimeout(id); resolve(); };
+      });
+      if (statusEl.textContent.startsWith("Broadcasting")) statusEl.textContent = "Done. Ready to broadcast again.";
+    } catch(err){
+      statusEl.textContent = "Error: " + err.message;
+    } finally {
+      isBroadcasting = false;
+      activeBroadcast = null;
+      btn.textContent = "▶ Broadcast";
+      dotEl.classList.remove("on");
+      cancelAnimationFrame(sendRaf.id);
+    }
+  }
+
+  /* ============================= RECEIVER ============================== */
+  let listenCtx = null;
+  let micStream = null;
+  let listenAnalyser = null;
+  let listening = false;
+  let decodeRaf = null;
+
+  const ALL_CANDIDATES = [MARKER_START, MARKER_END, ...DATA_FREQS];
+
+  function dbAtFreq(freqDataDb, sampleRate, fftSize, targetFreq){
+    const binWidth = sampleRate / fftSize;
+    const centerBin = Math.round(targetFreq / binWidth);
+    let best = -Infinity;
+    for (let d=-1; d<=1; d++){
+      const idx = centerBin + d;
+      if (idx>=0 && idx<freqDataDb.length) best = Math.max(best, freqDataDb[idx]);
+    }
+    return best;
+  }
+
+  function classifyPeak(freqDataDb, sampleRate, fftSize, noiseFloor){
+    let bestFreq = null, bestExcess = -Infinity, secondExcess = -Infinity;
+    for (const f of ALL_CANDIDATES){
+      const db = dbAtFreq(freqDataDb, sampleRate, fftSize, f);
+      const base = (noiseFloor && noiseFloor.has(f)) ? noiseFloor.get(f) : -100;
+      const excess = db - base;
+      if (excess > bestExcess){ secondExcess = bestExcess; bestExcess = excess; bestFreq = f; }
+      else if (excess > secondExcess){ secondExcess = excess; }
+    }
+    const REL_THRESHOLD = 9, MARGIN = 4;
+    if (bestExcess > REL_THRESHOLD && (bestExcess - secondExcess) > MARGIN){
+      return { freq: bestFreq, db: bestExcess };
+    }
+    return null;
+  }
+
+  // Ambient noise (fans, HVAC, electrical hum, mic self-noise) is naturally
+  // strongest at low frequencies — exactly where the marker tones live — so a
+  // single fixed dB threshold can stay "triggered" by room noise alone. This
+  // samples a brief moment of ambient sound per-candidate-frequency so
+  // detection can require a tone to stand out above *this room's* baseline,
+  // rather than above an arbitrary global number.
+  function calibrateNoiseFloor(analyser, sampleRate, fftSize, durationMs, isStillActive){
+    const dataArray = new Float32Array(analyser.frequencyBinCount);
+    const sums = new Map(ALL_CANDIDATES.map(f => [f, 0]));
+    let samples = 0;
+    const start = performance.now();
+    return new Promise(resolve => {
+      function sampleFrame(){
+        if (!isStillActive()){ resolve(null); return; }
+        analyser.getFloatFrequencyData(dataArray);
+        for (const f of ALL_CANDIDATES){
+          sums.set(f, sums.get(f) + dbAtFreq(dataArray, sampleRate, fftSize, f));
+        }
+        samples++;
+        if (performance.now() - start < durationMs){
+          requestAnimationFrame(sampleFrame);
+        } else {
+          const floor = new Map();
+          for (const f of ALL_CANDIDATES) floor.set(f, sums.get(f)/samples + 3); // +3dB safety pad
+          resolve(floor);
+        }
+      }
+      sampleFrame();
+    });
+  }
+
+  function saveToHistory(text){
+    const entry = { text, ts: Date.now() };
+    (async () => {
+      try{
+        let history = [];
+        try{
+          const existing = await window.storage.get("signal:history", false);
+          if (existing && existing.value) history = JSON.parse(existing.value);
+        } catch(e){ /* key not found yet */ }
+        history.unshift(entry);
+        history = history.slice(0, 25);
+        await window.storage.set("signal:history", JSON.stringify(history), false);
+        renderHistory(history);
+      } catch(e){
+        // storage unavailable — fall back to just showing this one result
+        renderHistory([entry]);
+      }
+    })();
+  }
+
+  function renderHistory(history){
+    const el = document.getElementById("historyList");
+    if (!history || history.length === 0){
+      el.innerHTML = '<div class="history-empty">No messages received yet.</div>';
+      return;
+    }
+    el.innerHTML = history.map(h => {
+      const d = new Date(h.ts);
+      const time = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      return `<div class="history-item"><span>${escapeHtml(h.text)}</span><time>${time}</time></div>`;
+    }).join("");
+  }
+
+  function escapeHtml(s){
+    return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  async function loadHistory(){
+    try{
+      const existing = await window.storage.get("signal:history", false);
+      if (existing && existing.value) renderHistory(JSON.parse(existing.value));
+    } catch(e){ /* nothing saved yet */ }
+  }
+
+  const listenScopeEl = document.getElementById("listenScope");
+  const listenRaf = { id: null };
+  resizeCanvas(listenScopeEl);
+  window.addEventListener("resize", () => resizeCanvas(listenScopeEl));
+
+  async function checkMicPermissionState(){
+    if (!navigator.permissions || !navigator.permissions.query) return null;
+    try{
+      const status = await navigator.permissions.query({ name: "microphone" });
+      return status.state; // "granted" | "denied" | "prompt"
+    } catch(e){ return null; }
+  }
+
+  async function startListening(){
+    const btn = document.getElementById("listenBtn");
+    const statusEl = document.getElementById("listenStatus");
+    const dotEl = document.getElementById("listenDot");
+    const resultEl = document.getElementById("resultCard");
+
+    // Reset any previous denied/error state before trying again.
+    dotEl.classList.remove("warn");
+    btn.disabled = true;
+
+    const permState = await checkMicPermissionState();
+    if (permState === "denied"){
+      statusEl.innerHTML = 'Microphone access is blocked for this page. Click the 🔒 or ⓘ icon next to the address bar, allow the microphone, then press "Try again".';
+      dotEl.classList.add("warn");
+      btn.textContent = "🎙 Try again";
+      btn.disabled = false;
+      return;
+    }
+
+    statusEl.textContent = "Requesting microphone access…";
+
+    try{
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+      });
+    } catch(err){
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError"){
+        statusEl.innerHTML = 'Microphone permission was denied. Click the 🔒 or ⓘ icon next to the address bar, allow the microphone, then press "Try again".';
+      } else if (err.name === "NotFoundError"){
+        statusEl.textContent = "No microphone was found on this device.";
+      } else {
+        statusEl.textContent = "Microphone error: " + err.message;
+      }
+      dotEl.classList.add("warn");
+      btn.textContent = "🎙 Try again";
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+
+    listenCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = listenCtx.createMediaStreamSource(micStream);
+    listenAnalyser = listenCtx.createAnalyser();
+    listenAnalyser.fftSize = 4096;
+    listenAnalyser.smoothingTimeConstant = 0;
+    source.connect(listenAnalyser);
+
+    listening = true;
+    btn.textContent = "⏹ Stop listening";
+    dotEl.classList.remove("warn");
+    dotEl.classList.add("on");
+    drawScopeFrom(listenAnalyser, listenScopeEl, listenRaf);
+
+    // --- decode state machine ---
+    const sampleRate = listenCtx.sampleRate;
+    const fftSize = listenAnalyser.fftSize;
+    const dataArray = new Float32Array(listenAnalyser.frequencyBinCount);
+    const symbolPeriod = (SYMBOL_MS + GAP_MS);
+    const markerPeriod = (MARKER_MS + MARKER_GAP_MS);
+
+    statusEl.textContent = "Calibrating microphone — stay quiet for a moment…";
+    const noiseFloor = await calibrateNoiseFloor(listenAnalyser, sampleRate, fftSize, 500, () => listening);
+    if (!listening || !noiseFloor) return; // stopped during calibration
+    statusEl.textContent = "Listening for a signal…";
+
+    let state = "idle"; // idle -> markerSustain -> reading
+    let armedSince = 0;
+    let symbolAnchor = 0;
+    let currentWindowIdx = 0;
+    let windowBest = { freq: null, db: -Infinity };
+    let nibbles = [];
+    let expectedNibbles = null;
+    let lastActivity = 0;
+
+    function reset(msg){
+      state = "idle"; armedSince = 0; nibbles = []; expectedNibbles = null;
+      windowBest = { freq: null, db: -Infinity };
+      statusEl.textContent = msg || "Listening for a signal…";
+    }
+
+    function finalizeWindow(){
+      if (windowBest.freq !== null){
+        const nibVal = DATA_FREQS.indexOf(windowBest.freq);
+        if (nibVal >= 0){
+          nibbles.push(nibVal);
+          lastActivity = performance.now();
+
+          if (expectedNibbles === null && nibbles.length === 2){
+            const lengthByte = (nibbles[0]<<4) | nibbles[1];
+            if (lengthByte > 40){ reset(); return; }
+            expectedNibbles = (lengthByte + 2) * 2; // length byte + payload + checksum
+          }
+
+          if (expectedNibbles !== null && nibbles.length >= expectedNibbles){
+            const bytes = nibblesToBytes(nibbles.slice(0, expectedNibbles));
+            const lengthByte = bytes[0];
+            const payload = bytes.slice(1, 1+lengthByte);
+            const checksum = bytes[1+lengthByte];
+            let computed = 0;
+            for (const b of payload) computed = (computed + b) & 0xFF;
+            if (computed === checksum){
+              const text = new TextDecoder().decode(payload);
+              resultEl.textContent = text;
+              resultEl.classList.remove("empty");
+              statusEl.textContent = "Received! Listening for the next signal…";
+              saveToHistory(text);
+            } else {
+              statusEl.textContent = "Checksum mismatch — discarded a garbled read.";
+            }
+            reset();
+            return;
+          }
+        }
+      }
+      windowBest = { freq: null, db: -Infinity };
+    }
+
+    function tick(){
+      decodeRaf = requestAnimationFrame(tick);
+      if (!listening) return;
+      listenAnalyser.getFloatFrequencyData(dataArray);
+      const peak = classifyPeak(dataArray, sampleRate, fftSize, noiseFloor);
+      const now = performance.now();
+
+      if (state === "idle"){
+        if (peak && peak.freq === MARKER_START){
+          if (!armedSince) armedSince = now;
+          if (now - armedSince > MARKER_MS*0.5){
+            state = "markerSustain";
+            statusEl.textContent = "Signal detected — syncing…";
+            dotEl.classList.add("on");
+          }
+        } else {
+          armedSince = 0;
+        }
+        return;
+      }
+
+      if (state === "markerSustain"){
+        // Wait for the marker tone to actually stop, then anchor the symbol
+        // clock to that real acoustic edge (much more reliable than guessing
+        // how much of the marker's duration is left).
+        if (!(peak && peak.freq === MARKER_START)){
+          symbolAnchor = now + MARKER_GAP_MS;
+          currentWindowIdx = 0;
+          windowBest = { freq: null, db: -Infinity };
+          nibbles = [];
+          expectedNibbles = null;
+          lastActivity = now;
+          state = "reading";
+          statusEl.textContent = "Locked — decoding…";
+        }
+        return;
+      }
+
+      if (state === "reading"){
+        const elapsed = now - symbolAnchor;
+        if (elapsed >= 0){
+          const idx = Math.floor(elapsed / symbolPeriod);
+          while (idx > currentWindowIdx){
+            finalizeWindow();
+            if (state !== "reading") return; // completed or aborted mid-loop
+            currentWindowIdx++;
+          }
+          if (peak && peak.freq !== MARKER_START && peak.freq !== MARKER_END && peak.db > windowBest.db){
+            windowBest = { freq: peak.freq, db: peak.db };
+          }
+        }
+        if (now - lastActivity > markerPeriod * 3){ reset(); }
+      }
+    }
+    tick();
+  }
+
+  function stopListening(){
+    listening = false;
+    if (decodeRaf) cancelAnimationFrame(decodeRaf);
+    if (listenRaf.id) cancelAnimationFrame(listenRaf.id);
+    if (micStream) micStream.getTracks().forEach(t => t.stop());
+    if (listenCtx) listenCtx.close();
+    document.getElementById("listenBtn").textContent = "🎙 Start listening";
+    document.getElementById("listenStatus").textContent = "Not listening.";
+    document.getElementById("listenDot").classList.remove("on");
+  }
+
+  /* =============================== WIRING =============================== */
+  const msgInput = document.getElementById("msgInput");
+  const charCount = document.getElementById("charCount");
+  msgInput.addEventListener("input", () => { charCount.textContent = msgInput.value.length; });
+
+  let repeatCount = 3;
+  document.getElementById("repeatRow").addEventListener("click", (e) => {
+    const btn = e.target.closest(".repeat-btn");
+    if (!btn) return;
+    document.querySelectorAll(".repeat-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    repeatCount = parseInt(btn.dataset.r, 10);
+  });
+
+  document.getElementById("broadcastBtn").addEventListener("click", () => {
+    if (isBroadcasting){ stopBroadcast(); return; }
+    const text = msgInput.value.trim();
+    if (!text){ document.getElementById("sendStatus").textContent = "Type a message first."; return; }
+    broadcast(text, repeatCount);
+  });
+
+  document.getElementById("listenBtn").addEventListener("click", () => {
+    if (listening) stopListening(); else startListening();
+  });
+
+  document.getElementById("clearHistoryBtn").addEventListener("click", async () => {
+    try{ await window.storage.delete("signal:history", false); } catch(e){}
+    renderHistory([]);
+  });
+
+  loadHistory();
+})();
+</script>
+</body>
+</html>
