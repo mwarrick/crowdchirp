@@ -293,7 +293,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 03:25 UTC · v20 (audio-element playback for iOS)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 03:45 UTC · v21 (fix stop-during-render race)</div>
   </footer>
 </div>
 
@@ -377,6 +377,7 @@
 
   /* ============================== SENDER =============================== */
   let isBroadcasting = false;
+  let broadcastCancelRequested = false;
   let activeBroadcast = null; // { player, cancelled, resolveEarly }
   let currentBlobUrl = null;
 
@@ -469,10 +470,11 @@
   }
 
   function stopBroadcast(){
-    if (!activeBroadcast) return;
+    broadcastCancelRequested = true;
+    document.getElementById("sendStatus").textContent = "Stopped.";
+    if (!activeBroadcast) return; // still rendering — the check after rendering will catch this
     activeBroadcast.cancelled = true;
     activeBroadcast.player.pause();
-    document.getElementById("sendStatus").textContent = "Stopped.";
     if (activeBroadcast.resolveEarly) activeBroadcast.resolveEarly();
     activeBroadcast = null;
   }
@@ -522,6 +524,7 @@
   async function broadcast(text, repeats){
     if (isBroadcasting) return;
     isBroadcasting = true;
+    broadcastCancelRequested = false;
     const btn = document.getElementById("broadcastBtn");
     const statusEl = document.getElementById("sendStatus");
     const dotEl = document.getElementById("sendDot");
@@ -535,6 +538,12 @@
 
       statusEl.textContent = "Rendering audio…";
       const { buffer, events, totalSec } = await renderToneSequence(nibbles, repeats);
+
+      if (broadcastCancelRequested){
+        statusEl.textContent = "Stopped.";
+        return;
+      }
+
       const blob = audioBufferToWavBlob(buffer);
       if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
       currentBlobUrl = URL.createObjectURL(blob);
