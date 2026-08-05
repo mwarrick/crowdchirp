@@ -230,7 +230,10 @@
       <canvas class="scope" id="sendScope"></canvas>
 
       <div>
-        <label class="field-label">TRANSMISSION LOG</label>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:7px;">
+          <label class="field-label" style="margin-bottom:0;">TRANSMISSION LOG</label>
+          <button class="secondary" id="copySendLogBtn" style="padding:4px 10px; font-size:11px;">📋 Copy log</button>
+        </div>
         <div class="txlog" id="sendLog"></div>
       </div>
 
@@ -259,7 +262,10 @@
       <canvas class="scope" id="listenScope"></canvas>
 
       <div>
-        <label class="field-label">RECEPTION LOG</label>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:7px;">
+          <label class="field-label" style="margin-bottom:0;">RECEPTION LOG</label>
+          <button class="secondary" id="copyListenLogBtn" style="padding:4px 10px; font-size:11px;">📋 Copy log</button>
+        </div>
         <div class="txlog" id="listenLog"></div>
       </div>
 
@@ -286,7 +292,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 02:00 UTC · v16 (clickable link results)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 02:15 UTC · v17 (copy log buttons)</div>
   </footer>
 </div>
 
@@ -927,6 +933,41 @@
   document.getElementById("clearHistoryBtn").addEventListener("click", async () => {
     try{ await window.storage.delete("signal:history", false); } catch(e){}
     renderHistory([]);
+  });
+
+  function copyLogToClipboard(containerId, btn){
+    const el = document.getElementById(containerId);
+    const lines = Array.from(el.children).map(div => div.textContent).join("\n");
+    const originalLabel = btn.textContent;
+    const flash = (label) => {
+      btn.textContent = label;
+      setTimeout(() => { btn.textContent = originalLabel; }, 1500);
+    };
+    if (!lines){ flash("(log is empty)"); return; }
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(lines).then(
+        () => flash("✓ Copied!"),
+        () => flash("✗ Copy failed")
+      );
+    } else {
+      // Fallback for browsers/contexts without clipboard API access
+      const ta = document.createElement("textarea");
+      ta.value = lines;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try{ document.execCommand("copy"); flash("✓ Copied!"); }
+      catch(e){ flash("✗ Copy failed"); }
+      document.body.removeChild(ta);
+    }
+  }
+
+  document.getElementById("copyListenLogBtn").addEventListener("click", (e) => {
+    copyLogToClipboard("listenLog", e.currentTarget);
+  });
+  document.getElementById("copySendLogBtn").addEventListener("click", (e) => {
+    copyLogToClipboard("sendLog", e.currentTarget);
   });
 
   loadHistory();
