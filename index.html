@@ -263,7 +263,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:35 UTC · v9 (fixed threshold, no calibration)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:55 UTC · v10 (marker-edge debounce)</div>
   </footer>
 </div>
 
@@ -621,6 +621,7 @@
 
     let state = "idle"; // idle -> markerSustain -> reading
     let armedSince = 0;
+    let markerOffSince = 0;
     let symbolAnchor = 0;
     let currentWindowIdx = 0;
     let windowBest = { freq: null, db: -Infinity };
@@ -629,7 +630,7 @@
     let lastActivity = 0;
 
     function reset(msg){
-      state = "idle"; armedSince = 0; nibbles = []; expectedNibbles = null;
+      state = "idle"; armedSince = 0; markerOffSince = 0; nibbles = []; expectedNibbles = null;
       windowBest = { freq: null, db: -Infinity };
       statusEl.textContent = msg || "Listening for a signal…";
     }
@@ -704,17 +705,24 @@
 
       if (state === "markerSustain"){
         // Wait for the marker tone to actually stop, then anchor the symbol
-        // clock to that real acoustic edge (much more reliable than guessing
-        // how much of the marker's duration is left).
+        // clock to that real acoustic edge. Require the "off" reading to be
+        // sustained for a short stretch first — a single noisy/glitchy frame
+        // mid-tone shouldn't be able to trigger the edge way too early.
         if (!(peak && peak.freq === MARKER_START)){
-          symbolAnchor = now + MARKER_GAP_MS;
-          currentWindowIdx = 0;
-          windowBest = { freq: null, db: -Infinity };
-          nibbles = [];
-          expectedNibbles = null;
-          lastActivity = now;
-          state = "reading";
-          statusEl.textContent = "Locked — decoding…";
+          if (!markerOffSince) markerOffSince = now;
+          if (now - markerOffSince > 40){
+            symbolAnchor = markerOffSince + MARKER_GAP_MS;
+            currentWindowIdx = 0;
+            windowBest = { freq: null, db: -Infinity };
+            nibbles = [];
+            expectedNibbles = null;
+            lastActivity = now;
+            state = "reading";
+            markerOffSince = 0;
+            statusEl.textContent = "Locked — decoding…";
+          }
+        } else {
+          markerOffSince = 0;
         }
         return;
       }
@@ -732,7 +740,9 @@
             windowBest = { freq: peak.freq, db: peak.db };
           }
         }
-        if (now - lastActivity > markerPeriod * 3){ reset(); }
+        if (now - lastActivity > markerPeriod * 3){
+          reset(`Lost sync after ${nibbles.length} symbol(s) — listening for a signal…`);
+        }
       }
     }
     tick();
