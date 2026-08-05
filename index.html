@@ -286,7 +286,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 01:35 UTC · v15 (prefix stripping)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 02:00 UTC · v16 (clickable link results)</div>
   </footer>
 </div>
 
@@ -587,12 +587,25 @@
     el.innerHTML = history.map(h => {
       const d = new Date(h.ts);
       const time = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-      return `<div class="history-item"><span>${escapeHtml(h.text)}</span><time>${time}</time></div>`;
+      const isUrl = /^https?:\/\//i.test(h.text);
+      const content = isUrl
+        ? `<a href="${escapeHtml(h.text)}" target="_blank" rel="noopener noreferrer" style="color:var(--teal);">${escapeHtml(h.text)}</a>`
+        : escapeHtml(h.text);
+      return `<div class="history-item"><span>${content}</span><time>${time}</time></div>`;
     }).join("");
   }
 
   function escapeHtml(s){
     return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  }
+
+  function renderDecodedResult(el, text){
+    el.classList.remove("empty");
+    if (/^https?:\/\//i.test(text)){
+      el.innerHTML = `<a href="${escapeHtml(text)}" target="_blank" rel="noopener noreferrer" style="color:var(--teal); text-decoration:underline;">${escapeHtml(text)}</a>`;
+    } else {
+      el.textContent = text;
+    }
   }
 
   async function loadHistory(){
@@ -727,8 +740,7 @@
             if (computed === checksum){
               const prefix = KNOWN_PREFIXES[prefixId] || "";
               const text = prefix + new TextDecoder().decode(payload);
-              resultEl.textContent = text;
-              resultEl.classList.remove("empty");
+              renderDecodedResult(resultEl, text);
               logLine("listenLog", `${relT(now)}  ✓ DECODED: "${text}"`, "hl");
               saveToHistory(text);
               stopListening();
