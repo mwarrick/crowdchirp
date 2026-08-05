@@ -186,6 +186,7 @@
 </style>
 </head>
 <body>
+<audio id="sendPlayer" preload="auto" playsinline style="display:none"></audio>
 <div class="wrap">
 
   <header>
@@ -292,7 +293,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 02:40 UTC · v18 (harmonic-safe tone table)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 03:25 UTC · v20 (audio-element playback for iOS)</div>
   </footer>
 </div>
 
@@ -375,12 +376,11 @@
   }
 
   /* ============================== SENDER =============================== */
-  let sendCtx = null;
-  let sendAnalyser = null;
   let isBroadcasting = false;
-  let activeBroadcast = null; // { nodes: [{osc,gain}], resolveEarly }
+  let activeBroadcast = null; // { player, cancelled, resolveEarly }
+  let currentBlobUrl = null;
 
-  function scheduleTone(ctx, dest, freq, startTime, durationSec, nodeList){
+  function scheduleTone(ctx, dest, freq, startTime, durationSec){
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.frequency.value = freq;
@@ -393,22 +393,86 @@
     osc.connect(gain).connect(dest);
     osc.start(startTime);
     osc.stop(startTime + durationSec + 0.02);
-    if (nodeList) nodeList.push({ osc, gain });
+  }
+
+  // Render the full tone sequence into an in-memory audio buffer (no sound
+  // played yet — OfflineAudioContext just computes the samples). Building it
+  // this way, then playing the result through a real <audio> element, is what
+  // lets iOS route the sound through its "playback" category — the same one
+  // video/music apps use — instead of the raw-oscillator category that
+  // respects the phone's physical silent switch.
+  async function renderToneSequence(nibbles, repeats){
+    const symbolPeriod = (SYMBOL_MS + GAP_MS) / 1000;
+    const markerPeriod = (MARKER_MS + MARKER_GAP_MS) / 1000;
+    const totalPerRepeat = markerPeriod*2 + nibbles.length*symbolPeriod;
+    const totalSec = totalPerRepeat*repeats + (REPEAT_GAP_MS/1000)*(repeats-1) + 0.3;
+    const sampleRate = 44100;
+    const offlineCtx = new OfflineAudioContext(1, Math.ceil(totalSec*sampleRate), sampleRate);
+
+    const events = [];
+    let t = 0.05;
+    for (let r=0; r<repeats; r++){
+      scheduleTone(offlineCtx, offlineCtx.destination, MARKER_START, t, MARKER_MS/1000);
+      events.push({ time: t, text: `▶ START marker (repeat ${r+1}/${repeats})`, cls: "hl" });
+      t += markerPeriod;
+      for (const nib of nibbles){
+        scheduleTone(offlineCtx, offlineCtx.destination, DATA_FREQS[nib], t, SYMBOL_MS/1000);
+        events.push({ time: t, text: `  symbol 0x${nib.toString(16).toUpperCase()} → ${Math.round(DATA_FREQS[nib])}Hz` });
+        t += symbolPeriod;
+      }
+      scheduleTone(offlineCtx, offlineCtx.destination, MARKER_END, t, MARKER_MS/1000);
+      events.push({ time: t, text: `▶ END marker (repeat ${r+1}/${repeats})`, cls: "hl" });
+      t += markerPeriod;
+      if (r < repeats-1) t += REPEAT_GAP_MS/1000;
+    }
+
+    const renderedBuffer = await offlineCtx.startRendering();
+    return { buffer: renderedBuffer, events, totalSec: t };
+  }
+
+  function audioBufferToWavBlob(buffer){
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const numFrames = buffer.length;
+    const blockAlign = numChannels * 2;
+    const dataSize = numFrames * blockAlign;
+    const out = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(out);
+    const writeStr = (offset, str) => { for (let i=0;i<str.length;i++) view.setUint8(offset+i, str.charCodeAt(i)); };
+
+    writeStr(0, "RIFF");
+    view.setUint32(4, 36 + dataSize, true);
+    writeStr(8, "WAVE");
+    writeStr(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, "data");
+    view.setUint32(40, dataSize, true);
+
+    const channels = [];
+    for (let ch=0; ch<numChannels; ch++) channels.push(buffer.getChannelData(ch));
+    let offset = 44;
+    for (let i=0; i<numFrames; i++){
+      for (let ch=0; ch<numChannels; ch++){
+        let s = Math.max(-1, Math.min(1, channels[ch][i]));
+        s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        view.setInt16(offset, s, true);
+        offset += 2;
+      }
+    }
+    return new Blob([out], { type: "audio/wav" });
   }
 
   function stopBroadcast(){
     if (!activeBroadcast) return;
-    const now = sendCtx.currentTime;
-    for (const { osc, gain } of activeBroadcast.nodes){
-      try{
-        gain.gain.cancelScheduledValues(now);
-        gain.gain.setValueAtTime(gain.gain.value, now);
-        gain.gain.linearRampToValueAtTime(0, now + 0.03);
-        osc.stop(now + 0.04);
-      } catch(e){ /* already stopped */ }
-    }
+    activeBroadcast.cancelled = true;
+    activeBroadcast.player.pause();
     document.getElementById("sendStatus").textContent = "Stopped.";
-    activeBroadcast.logCancelled = true;
     if (activeBroadcast.resolveEarly) activeBroadcast.resolveEarly();
     activeBroadcast = null;
   }
@@ -435,6 +499,16 @@
     draw();
   }
 
+  function drawProgressBar(canvas, progress){
+    const ctx2d = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    ctx2d.clearRect(0, 0, w, h);
+    ctx2d.fillStyle = "#241d16";
+    ctx2d.fillRect(0, 0, w, h);
+    ctx2d.fillStyle = "#e8a13a";
+    ctx2d.fillRect(0, 0, w * Math.max(0, Math.min(1, progress)), h);
+  }
+
   function resizeCanvas(c){
     const rect = c.getBoundingClientRect();
     c.width = rect.width * devicePixelRatio;
@@ -442,7 +516,6 @@
   }
 
   const sendScopeEl = document.getElementById("sendScope");
-  const sendRaf = { id: null };
   resizeCanvas(sendScopeEl);
   window.addEventListener("resize", () => resizeCanvas(sendScopeEl));
 
@@ -452,6 +525,7 @@
     const btn = document.getElementById("broadcastBtn");
     const statusEl = document.getElementById("sendStatus");
     const dotEl = document.getElementById("sendDot");
+    const player = document.getElementById("sendPlayer");
     btn.textContent = "⏹ Stop";
     dotEl.classList.add("on");
 
@@ -459,70 +533,45 @@
       const frame = textToFrame(text);
       const nibbles = bytesToNibbles(frame);
 
-      if (!sendCtx) sendCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (sendCtx.state === "suspended") await sendCtx.resume();
+      statusEl.textContent = "Rendering audio…";
+      const { buffer, events, totalSec } = await renderToneSequence(nibbles, repeats);
+      const blob = audioBufferToWavBlob(buffer);
+      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+      currentBlobUrl = URL.createObjectURL(blob);
+      player.src = currentBlobUrl;
 
-      sendAnalyser = sendCtx.createAnalyser();
-      sendAnalyser.fftSize = 1024;
-      const masterGain = sendCtx.createGain();
-      masterGain.gain.value = 1;
-      masterGain.connect(sendCtx.destination);
-      masterGain.connect(sendAnalyser);
-      drawScopeFrom(sendAnalyser, sendScopeEl, sendRaf);
-
-      const nodes = [];
-      const events = [];
-      activeBroadcast = { nodes, resolveEarly: null, logCancelled: false };
-
-      let t = sendCtx.currentTime + 0.1;
-      const symbolPeriod = (SYMBOL_MS + GAP_MS) / 1000;
-      const markerPeriod = (MARKER_MS + MARKER_GAP_MS) / 1000;
-      const totalPerRepeat = markerPeriod*2 + nibbles.length*symbolPeriod;
-      const totalSec = totalPerRepeat*repeats + (REPEAT_GAP_MS/1000)*(repeats-1);
-
-      statusEl.textContent = `Broadcasting "${text}" · ~${totalSec.toFixed(1)}s for all ${repeats} repeat(s) combined`;
       document.getElementById("sendLog").innerHTML = "";
-
-      for (let r=0; r<repeats; r++){
-        scheduleTone(sendCtx, masterGain, MARKER_START, t, MARKER_MS/1000, nodes);
-        events.push({ time: t, text: `▶ START marker (repeat ${r+1}/${repeats})`, cls: "hl" });
-        t += markerPeriod;
-        for (const nib of nibbles){
-          scheduleTone(sendCtx, masterGain, DATA_FREQS[nib], t, SYMBOL_MS/1000, nodes);
-          events.push({ time: t, text: `  symbol 0x${nib.toString(16).toUpperCase()} → ${Math.round(DATA_FREQS[nib])}Hz` });
-          t += symbolPeriod;
-        }
-        scheduleTone(sendCtx, masterGain, MARKER_END, t, MARKER_MS/1000, nodes);
-        events.push({ time: t, text: `▶ END marker (repeat ${r+1}/${repeats})`, cls: "hl" });
-        t += markerPeriod;
-        if (r < repeats-1) t += REPEAT_GAP_MS/1000;
-      }
+      statusEl.textContent = `Broadcasting "${text}" · ~${totalSec.toFixed(1)}s for all ${repeats} repeat(s) combined`;
+      activeBroadcast = { player, cancelled: false, resolveEarly: null };
 
       let eventIdx = 0;
       function monitorPlayback(){
-        if (!activeBroadcast || activeBroadcast.logCancelled) return;
-        while (eventIdx < events.length && sendCtx.currentTime >= events[eventIdx].time){
+        if (!activeBroadcast || activeBroadcast.cancelled) return;
+        while (eventIdx < events.length && player.currentTime >= events[eventIdx].time){
           logLine("sendLog", events[eventIdx].text, events[eventIdx].cls);
           eventIdx++;
         }
-        if (eventIdx < events.length) requestAnimationFrame(monitorPlayback);
+        drawProgressBar(sendScopeEl, player.currentTime / totalSec);
+        if (!player.ended) requestAnimationFrame(monitorPlayback);
       }
       requestAnimationFrame(monitorPlayback);
 
-      await new Promise(resolve => {
-        const id = setTimeout(resolve, totalSec*1000 + 150);
-        if (activeBroadcast) activeBroadcast.resolveEarly = () => { clearTimeout(id); resolve(); };
+      await new Promise((resolve, reject) => {
+        player.onended = resolve;
+        player.onerror = () => reject(new Error("Playback error — try again."));
+        if (activeBroadcast) activeBroadcast.resolveEarly = resolve;
+        player.play().catch(reject);
       });
+
       if (statusEl.textContent.startsWith("Broadcasting")) statusEl.textContent = "Done. Ready to broadcast again.";
     } catch(err){
       statusEl.textContent = "Error: " + err.message;
     } finally {
       isBroadcasting = false;
-      if (activeBroadcast) activeBroadcast.logCancelled = true;
+      if (activeBroadcast) activeBroadcast.cancelled = true;
       activeBroadcast = null;
       btn.textContent = "▶ Broadcast";
       dotEl.classList.remove("on");
-      cancelAnimationFrame(sendRaf.id);
     }
   }
 
