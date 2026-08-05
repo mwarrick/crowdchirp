@@ -263,7 +263,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 22:05 UTC · v7 (diagnostic readout)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:10 UTC · v8 (peak-hold diagnostic)</div>
   </footer>
 </div>
 
@@ -454,6 +454,7 @@
   let listenAnalyser = null;
   let listening = false;
   let decodeRaf = null;
+  let lastSessionPeak = null; // { freq, db, recognized } — loudest thing heard this session
 
   const ALL_CANDIDATES = [MARKER_START, MARKER_END, ...DATA_FREQS];
 
@@ -652,6 +653,7 @@
     document.getElementById("diagRow").style.display = "flex";
     const diagFreqEl = document.getElementById("diagFreq");
     let lastDiagUpdate = 0;
+    lastSessionPeak = { freq: null, db: -Infinity, recognized: null };
 
     let state = "idle"; // idle -> markerSustain -> reading
     let armedSince = 0;
@@ -717,6 +719,9 @@
         const g = findGlobalPeak(dataArray, sampleRate, fftSize, 100, 4000);
         const isKnown = peak ? ` — recognized as ${Math.round(peak.freq)}Hz` : "";
         diagFreqEl.textContent = `${g.freq}Hz (${g.db.toFixed(0)}dB)${isKnown}`;
+        if (g.db > lastSessionPeak.db){
+          lastSessionPeak = { freq: g.freq, db: g.db, recognized: peak ? Math.round(peak.freq) : null };
+        }
       }
 
       if (state === "idle"){
@@ -778,7 +783,18 @@
     document.getElementById("listenBtn").textContent = "🎙 Start listening";
     document.getElementById("listenStatus").textContent = "Not listening.";
     document.getElementById("listenDot").classList.remove("on");
-    document.getElementById("diagRow").style.display = "none";
+
+    const diagRow = document.getElementById("diagRow");
+    const diagFreqEl = document.getElementById("diagFreq");
+    if (lastSessionPeak && lastSessionPeak.freq !== null){
+      const recognizedText = lastSessionPeak.recognized
+        ? ` — recognized as ${lastSessionPeak.recognized}Hz`
+        : " — not recognized as any known tone";
+      diagFreqEl.textContent = `Peak this session: ${lastSessionPeak.freq}Hz (${lastSessionPeak.db.toFixed(0)}dB)${recognizedText}`;
+      diagRow.style.display = "flex";
+    } else {
+      diagRow.style.display = "none";
+    }
   }
 
   /* =============================== WIRING =============================== */
