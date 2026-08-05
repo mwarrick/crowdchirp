@@ -247,7 +247,7 @@
 
       <details class="legend" id="senderDetails">
         <summary>How the encoding works</summary>
-        <p>Your text is converted to bytes, wrapped with a length header and a checksum, then split into 4-bit chunks. Each chunk becomes one of 16 tones, evenly spaced and confined to less than one octave — this trades some musicality for a guarantee that no tone's natural harmonic distortion can be mistaken for a different tone. A high marker tone signals "start", a different low tone signals "end". If your message starts with a known shortened-URL prefix (like is.gd), that prefix is replaced with a single flag byte instead of being transmitted character-by-character. Repeats give listeners in a noisy room more chances to catch a clean pass.</p>
+        <p>Your text is converted to bytes, wrapped with a length header and a checksum, then split into 4-bit chunks. Each chunk becomes one of 16 tones, evenly spaced and confined to less than one octave — this trades some musicality for a guarantee that no tone's natural harmonic distortion can be mistaken for a different tone. A single high marker tone signals "start"; "end" is a dual-tone chord (low + high together) so a lone low frequency in the room can't fake it. If your message starts with a known shortened-URL prefix (like is.gd), that prefix is replaced with a single flag byte instead of being transmitted character-by-character. Repeats give listeners in a noisy room more chances to catch a clean pass.</p>
       </details>
     </section>
 
@@ -296,7 +296,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 22:30 UTC · v24 (quieter START + post-marker AGC settle)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 22:35 UTC · v25 (dual-tone END chord)</div>
   </footer>
 </div>
 
@@ -321,9 +321,13 @@
   const ALL_TONES = Array.from({length: TONE_COUNT}, (_, i) =>
     TONE_LOW + i * (TONE_HIGH - TONE_LOW) / (TONE_COUNT - 1)
   );
-  const MARKER_END   = ALL_TONES[0];               // 700Hz — low extreme
-  const DATA_FREQS   = ALL_TONES.slice(1, 17);      // 16 tones in between
-  const MARKER_START = ALL_TONES[17];              // 1330Hz — high extreme
+  const MARKER_END_LOW  = ALL_TONES[0];            // 700Hz — low half of END chord
+  const DATA_FREQS      = ALL_TONES.slice(1, 17);  // 16 tones in between
+  const MARKER_START    = ALL_TONES[17];           // 1330Hz — high extreme (solo = START)
+  const MARKER_END_HIGH = MARKER_START;            // 1330Hz — high half of END chord
+  // END is a dual-tone chord (700+1330). A lone 700Hz in the room used to false-trigger
+  // "heard END" mid-message; requiring both extremes together makes that much harder.
+  // START remains solo 1330 — distinguished from END by the absence of the low component.
 
   const SYMBOL_MS  = 130;   // tone duration per nibble
   const GAP_MS     = 70;    // silence between symbols — long enough for typical room echo/reverb to decay before the next tone is judged
@@ -337,7 +341,7 @@
   const REPEAT_GAP_MS = 500;
   const DATA_GAIN = 0.28;
   const MARKER_START_GAIN = 0.11; // ~8dB quieter than data — less AGC kick from START
-  const MARKER_END_GAIN = 0.22;
+  const MARKER_END_GAIN_EACH = 0.14; // per partial; two together ≈ data loudness without clipping
 
   // Known URL prefixes that get replaced with a single flag byte instead of
   // being transmitted character-by-character. is.gd links all share the same
@@ -407,6 +411,11 @@
     osc.stop(startTime + durationSec + 0.02);
   }
 
+  function scheduleDualTone(ctx, dest, freqA, freqB, startTime, durationSec, peakGainEach){
+    scheduleTone(ctx, dest, freqA, startTime, durationSec, peakGainEach);
+    scheduleTone(ctx, dest, freqB, startTime, durationSec, peakGainEach);
+  }
+
   // Render the full tone sequence into an in-memory audio buffer (no sound
   // played yet — OfflineAudioContext just computes the samples). Building it
   // this way, then playing the result through a real <audio> element, is what
@@ -433,8 +442,8 @@
         events.push({ time: t, text: `  symbol 0x${nib.toString(16).toUpperCase()} → ${Math.round(DATA_FREQS[nib])}Hz` });
         t += symbolPeriod;
       }
-      scheduleTone(offlineCtx, offlineCtx.destination, MARKER_END, t, MARKER_MS/1000, MARKER_END_GAIN);
-      events.push({ time: t, text: `▶ END marker (repeat ${r+1}/${repeats})`, cls: "hl" });
+      scheduleDualTone(offlineCtx, offlineCtx.destination, MARKER_END_LOW, MARKER_END_HIGH, t, MARKER_MS/1000, MARKER_END_GAIN_EACH);
+      events.push({ time: t, text: `▶ END chord ${Math.round(MARKER_END_LOW)}+${Math.round(MARKER_END_HIGH)}Hz (repeat ${r+1}/${repeats})`, cls: "hl" });
       t += endPeriod;
       if (r < repeats-1) t += REPEAT_GAP_MS/1000;
     }
@@ -604,7 +613,8 @@
   let decodeRaf = null;
   let lastSessionPeak = null; // { freq, db, recognized } — loudest thing heard this session
 
-  const ALL_CANDIDATES = [MARKER_START, MARKER_END, ...DATA_FREQS];
+  const DETECT_THRESHOLD = -65;
+  const DETECT_MARGIN = 6;
 
   function dbAtFreq(freqDataDb, sampleRate, fftSize, targetFreq){
     const binWidth = sampleRate / fftSize;
@@ -630,15 +640,45 @@
     return { freq: Math.round(bestBin * binWidth), db: bestDb };
   }
 
+  function loudestDataDb(freqDataDb, sampleRate, fftSize){
+    let best = -Infinity;
+    for (const f of DATA_FREQS){
+      best = Math.max(best, dbAtFreq(freqDataDb, sampleRate, fftSize, f));
+    }
+    return best;
+  }
+
+  // Solo 1330Hz = START. Reject when the END chord's low partial is also up
+  // (700+1330 together is END, not a new START).
+  function detectStart(freqDataDb, sampleRate, fftSize){
+    const startDb = dbAtFreq(freqDataDb, sampleRate, fftSize, MARKER_START);
+    const endLowDb = dbAtFreq(freqDataDb, sampleRate, fftSize, MARKER_END_LOW);
+    if (startDb <= DETECT_THRESHOLD) return null;
+    if (endLowDb > DETECT_THRESHOLD && (startDb - endLowDb) < 8) return null;
+    if (startDb - loudestDataDb(freqDataDb, sampleRate, fftSize) <= DETECT_MARGIN) return null;
+    return { freq: MARKER_START, db: startDb };
+  }
+
+  // Dual-tone END: both 700Hz and 1330Hz must be present together.
+  function detectEndChord(freqDataDb, sampleRate, fftSize){
+    const lowDb = dbAtFreq(freqDataDb, sampleRate, fftSize, MARKER_END_LOW);
+    const highDb = dbAtFreq(freqDataDb, sampleRate, fftSize, MARKER_END_HIGH);
+    if (lowDb <= DETECT_THRESHOLD || highDb <= DETECT_THRESHOLD) return null;
+    if (Math.abs(lowDb - highDb) > 10) return null; // unbalanced → not our chord
+    const weaker = Math.min(lowDb, highDb);
+    if (weaker - loudestDataDb(freqDataDb, sampleRate, fftSize) < 3) return null;
+    return { lowDb, highDb, db: (lowDb + highDb) / 2 };
+  }
+
+  // Data symbols only — markers are handled by detectStart / detectEndChord.
   function classifyPeak(freqDataDb, sampleRate, fftSize){
     let bestFreq = null, bestDb = -Infinity, secondDb = -Infinity;
-    for (const f of ALL_CANDIDATES){
+    for (const f of DATA_FREQS){
       const db = dbAtFreq(freqDataDb, sampleRate, fftSize, f);
       if (db > bestDb){ secondDb = bestDb; bestDb = db; bestFreq = f; }
       else if (db > secondDb){ secondDb = db; }
     }
-    const THRESHOLD = -65, MARGIN = 6;
-    if (bestDb > THRESHOLD && (bestDb - secondDb) > MARGIN){
+    if (bestDb > DETECT_THRESHOLD && (bestDb - secondDb) > DETECT_MARGIN){
       return { freq: bestFreq, db: bestDb };
     }
     return null;
@@ -850,27 +890,32 @@
       decodeRaf = requestAnimationFrame(tick);
       if (!listening) return;
       listenAnalyser.getFloatFrequencyData(dataArray);
-      const peak = classifyPeak(dataArray, sampleRate, fftSize);
+      const startHit = detectStart(dataArray, sampleRate, fftSize);
+      const endHit = detectEndChord(dataArray, sampleRate, fftSize);
+      const peak = (!startHit && !endHit) ? classifyPeak(dataArray, sampleRate, fftSize) : null;
       const now = performance.now();
 
       if (now - lastDiagUpdate > 200){
         lastDiagUpdate = now;
         const g = findGlobalPeak(dataArray, sampleRate, fftSize, 100, 4000);
-        const isKnown = peak ? ` — recognized as ${Math.round(peak.freq)}Hz` : "";
+        let isKnown = "";
+        if (endHit) isKnown = ` — recognized as END chord`;
+        else if (startHit) isKnown = ` — recognized as START ${Math.round(startHit.freq)}Hz`;
+        else if (peak) isKnown = ` — recognized as ${Math.round(peak.freq)}Hz`;
         diagFreqEl.textContent = `${g.freq}Hz (${g.db.toFixed(0)}dB)${isKnown}`;
         if (g.db > lastSessionPeak.db){
-          lastSessionPeak = { freq: g.freq, db: g.db, recognized: peak ? Math.round(peak.freq) : null };
+          lastSessionPeak = { freq: g.freq, db: g.db, recognized: peak ? Math.round(peak.freq) : (startHit ? Math.round(startHit.freq) : null) };
         }
       }
 
       if (state === "idle"){
-        if (peak && peak.freq === MARKER_START){
+        if (startHit){
           if (!armedSince) armedSince = now;
           if (now - armedSince > MARKER_MS*0.5){
             state = "markerSustain";
             statusEl.textContent = "Signal detected — syncing…";
             dotEl.classList.add("on");
-            logLine("listenLog", `${relT(now)}  ✓ heard START (${Math.round(peak.freq)}Hz, ${peak.db.toFixed(0)}dB)`, "hl");
+            logLine("listenLog", `${relT(now)}  ✓ heard START (${Math.round(startHit.freq)}Hz, ${startHit.db.toFixed(0)}dB)`, "hl");
             endLogged = false;
           }
         } else {
@@ -884,7 +929,7 @@
         // clock to that real acoustic edge. Require the "off" reading to be
         // sustained for a short stretch first — a single noisy/glitchy frame
         // mid-tone shouldn't be able to trigger the edge way too early.
-        if (!(peak && peak.freq === MARKER_START)){
+        if (!startHit){
           if (!markerOffSince) markerOffSince = now;
           if (now - markerOffSince > 40){
             // Match TX: first data symbol begins MARKER_SETTLE_MS after START falls.
@@ -914,10 +959,10 @@
             if (state !== "reading") return; // completed or aborted mid-loop
             currentWindowIdx++;
           }
-          if (peak && peak.freq === MARKER_END && !endLogged){
+          if (endHit && !endLogged){
             endLogged = true;
-            logLine("listenLog", `${relT(now)}  ✓ heard END (${Math.round(peak.freq)}Hz, ${peak.db.toFixed(0)}dB)`, "hl");
-          } else if (peak && peak.freq !== MARKER_START && peak.freq !== MARKER_END && peak.db > windowBest.db){
+            logLine("listenLog", `${relT(now)}  ✓ heard END chord (${Math.round(MARKER_END_LOW)}+${Math.round(MARKER_END_HIGH)}Hz, ${endHit.db.toFixed(0)}dB)`, "hl");
+          } else if (peak && peak.db > windowBest.db){
             windowBest = { freq: peak.freq, db: peak.db };
           }
         }
