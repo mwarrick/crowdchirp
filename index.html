@@ -263,7 +263,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:10 UTC · v8 (peak-hold diagnostic)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:35 UTC · v9 (fixed threshold, no calibration)</div>
   </footer>
 </div>
 
@@ -482,51 +482,18 @@
     return { freq: Math.round(bestBin * binWidth), db: bestDb };
   }
 
-  function classifyPeak(freqDataDb, sampleRate, fftSize, noiseFloor){
-    let bestFreq = null, bestExcess = -Infinity, secondExcess = -Infinity;
+  function classifyPeak(freqDataDb, sampleRate, fftSize){
+    let bestFreq = null, bestDb = -Infinity, secondDb = -Infinity;
     for (const f of ALL_CANDIDATES){
       const db = dbAtFreq(freqDataDb, sampleRate, fftSize, f);
-      const base = (noiseFloor && noiseFloor.has(f)) ? noiseFloor.get(f) : -100;
-      const excess = db - base;
-      if (excess > bestExcess){ secondExcess = bestExcess; bestExcess = excess; bestFreq = f; }
-      else if (excess > secondExcess){ secondExcess = excess; }
+      if (db > bestDb){ secondDb = bestDb; bestDb = db; bestFreq = f; }
+      else if (db > secondDb){ secondDb = db; }
     }
-    const REL_THRESHOLD = 9, MARGIN = 4;
-    if (bestExcess > REL_THRESHOLD && (bestExcess - secondExcess) > MARGIN){
-      return { freq: bestFreq, db: bestExcess };
+    const THRESHOLD = -65, MARGIN = 6;
+    if (bestDb > THRESHOLD && (bestDb - secondDb) > MARGIN){
+      return { freq: bestFreq, db: bestDb };
     }
     return null;
-  }
-
-  // Ambient noise (fans, HVAC, electrical hum, mic self-noise) is naturally
-  // strongest at low frequencies — exactly where the marker tones live — so a
-  // single fixed dB threshold can stay "triggered" by room noise alone. This
-  // samples a brief moment of ambient sound per-candidate-frequency so
-  // detection can require a tone to stand out above *this room's* baseline,
-  // rather than above an arbitrary global number.
-  function calibrateNoiseFloor(analyser, sampleRate, fftSize, durationMs, isStillActive){
-    const dataArray = new Float32Array(analyser.frequencyBinCount);
-    const sums = new Map(ALL_CANDIDATES.map(f => [f, 0]));
-    let samples = 0;
-    const start = performance.now();
-    return new Promise(resolve => {
-      function sampleFrame(){
-        if (!isStillActive()){ resolve(null); return; }
-        analyser.getFloatFrequencyData(dataArray);
-        for (const f of ALL_CANDIDATES){
-          sums.set(f, sums.get(f) + dbAtFreq(dataArray, sampleRate, fftSize, f));
-        }
-        samples++;
-        if (performance.now() - start < durationMs){
-          requestAnimationFrame(sampleFrame);
-        } else {
-          const floor = new Map();
-          for (const f of ALL_CANDIDATES) floor.set(f, sums.get(f)/samples + 3); // +3dB safety pad
-          resolve(floor);
-        }
-      }
-      sampleFrame();
-    });
   }
 
   function saveToHistory(text){
@@ -646,9 +613,6 @@
     const symbolPeriod = (SYMBOL_MS + GAP_MS);
     const markerPeriod = (MARKER_MS + MARKER_GAP_MS);
 
-    statusEl.textContent = "Calibrating microphone — stay quiet for a moment…";
-    const noiseFloor = await calibrateNoiseFloor(listenAnalyser, sampleRate, fftSize, 500, () => listening);
-    if (!listening || !noiseFloor) return; // stopped during calibration
     statusEl.textContent = "Listening for a signal…";
     document.getElementById("diagRow").style.display = "flex";
     const diagFreqEl = document.getElementById("diagFreq");
@@ -711,7 +675,7 @@
       decodeRaf = requestAnimationFrame(tick);
       if (!listening) return;
       listenAnalyser.getFloatFrequencyData(dataArray);
-      const peak = classifyPeak(dataArray, sampleRate, fftSize, noiseFloor);
+      const peak = classifyPeak(dataArray, sampleRate, fftSize);
       const now = performance.now();
 
       if (now - lastDiagUpdate > 200){
