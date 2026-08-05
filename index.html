@@ -211,11 +211,14 @@
       <div>
         <label class="field-label" for="msgInput">MESSAGE (max 60 characters)</label>
         <input type="text" id="msgInput" maxlength="60" placeholder="e.g. https://example.com/promo" value="HELLO">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:5px;">
-          <span id="shortenStatus" style="font-size:11px; color:var(--text-dim); font-family:'IBM Plex Mono',monospace;"></span>
+        <div style="display:flex; justify-content:flex-end; align-items:center; margin-top:5px;">
           <span class="char-count" style="margin-top:0;"><span id="charCount">5</span>/60</span>
         </div>
-        <button class="secondary" id="shortenBtn" style="margin-top:8px; width:100%;">🔗 Shorten URL first</button>
+        <!-- Shorten-URL feature temporarily hidden (is.gd proved unreliable) — code kept intact for later reuse -->
+        <div id="shortenUI" style="display:none;">
+          <span id="shortenStatus" style="font-size:11px; color:var(--text-dim); font-family:'IBM Plex Mono',monospace;"></span>
+          <button class="secondary" id="shortenBtn" style="margin-top:8px; width:100%;">🔗 Shorten URL first</button>
+        </div>
       </div>
 
       <div>
@@ -293,7 +296,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 03:45 UTC · v21 (fix stop-during-render race)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 04:00 UTC · v22 (shorten-URL UI hidden)</div>
   </footer>
 </div>
 
