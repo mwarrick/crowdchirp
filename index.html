@@ -243,7 +243,7 @@
 
       <details class="legend" id="senderDetails">
         <summary>How the encoding works</summary>
-        <p>Your text is converted to bytes, wrapped with a length header and a checksum, then split into 4-bit chunks. Each chunk becomes one of 16 tones drawn from a musical scale (so sequences land as a little melody, not random beeps). A high marker tone signals "start", a different high tone signals "end" — kept well clear of typical phone-mic low-frequency roll-off. If your message starts with a known shortened-URL prefix (like is.gd), that prefix is replaced with a single flag byte instead of being transmitted character-by-character — a shortened link effectively costs just its code, not the whole domain. Repeats give listeners in a noisy room more chances to catch a clean pass.</p>
+        <p>Your text is converted to bytes, wrapped with a length header and a checksum, then split into 4-bit chunks. Each chunk becomes one of 16 tones, evenly spaced and confined to less than one octave — this trades some musicality for a guarantee that no tone's natural harmonic distortion can be mistaken for a different tone. A high marker tone signals "start", a different low tone signals "end". If your message starts with a known shortened-URL prefix (like is.gd), that prefix is replaced with a single flag byte instead of being transmitted character-by-character. Repeats give listeners in a noisy room more chances to catch a clean pass.</p>
       </details>
     </section>
 
@@ -292,7 +292,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 02:15 UTC · v17 (copy log buttons)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 02:40 UTC · v18 (harmonic-safe tone table)</div>
   </footer>
 </div>
 
@@ -304,12 +304,22 @@
   // 16 data tones, drawn from a major-pentatonic pattern across ~3 octaves
   // starting at C4, so a decoded sequence sounds like a little melody
   // rather than a modem screech.
-  const ROOT = 329.63; // E4 — safely above the ~200-300Hz zone phone mics tend to roll off
-  const SCALE_OFFSETS = [0,2,4,5,7,9,11,12, 14,16,17,19,21,23,24,26]; // two octaves, major scale
-  const DATA_FREQS = SCALE_OFFSETS.map(semi => ROOT * Math.pow(2, semi/12));
-
-  const MARKER_START = 1760.00; // A6 — above the data range, clearly separated
-  const MARKER_END   = 1567.98; // G6
+  // 18 tones spaced evenly across 700-1330Hz — deliberately confined to
+  // *less than one octave* (ratio 1.9). Real speakers/mics add a bit of
+  // harmonic distortion to any tone (faint copies at 2x/3x/4x the frequency),
+  // and a musical scale that repeats notes across octaves means those
+  // harmonics can land exactly on another "real" tone and get misread as it.
+  // Keeping every tone within a sub-octave band makes that impossible: the
+  // lowest possible 2nd harmonic (2 x 700 = 1400Hz) already falls above the
+  // highest tone in the set (1330Hz), so no harmonic of any tone can ever
+  // coincide with another tone.
+  const TONE_LOW = 700, TONE_HIGH = 1330, TONE_COUNT = 18;
+  const ALL_TONES = Array.from({length: TONE_COUNT}, (_, i) =>
+    TONE_LOW + i * (TONE_HIGH - TONE_LOW) / (TONE_COUNT - 1)
+  );
+  const MARKER_END   = ALL_TONES[0];               // 700Hz — low extreme
+  const DATA_FREQS   = ALL_TONES.slice(1, 17);      // 16 tones in between
+  const MARKER_START = ALL_TONES[17];              // 1330Hz — high extreme
 
   const SYMBOL_MS  = 130;   // tone duration per nibble
   const GAP_MS     = 20;    // silence between symbols (helps edge detection)
