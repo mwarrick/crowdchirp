@@ -250,7 +250,7 @@
 
       <details class="legend" id="senderDetails">
         <summary>How the encoding works</summary>
-        <p>Your text is converted to bytes, wrapped with a length header and a checksum, then split into 4-bit chunks. Each chunk becomes one of 16 tones, evenly spaced and confined to less than one octave — this trades some musicality for a guarantee that no tone's natural harmonic distortion can be mistaken for a different tone. A single high marker tone signals "start"; "end" is a dual-tone chord (low in-band + high above the data band) so a lone tone in the room can't fake it. If your message starts with a known shortened-URL prefix (like is.gd), that prefix is replaced with a single flag byte instead of being transmitted character-by-character. Repeats give listeners in a noisy room more chances to catch a clean pass.</p>
+        <p>Your text is converted to bytes, wrapped with a length header and Reed-Solomon parity (so a few masked tones can still be recovered), then split into 4-bit chunks. Each chunk becomes one of 16 tones, evenly spaced and confined to less than one octave — this trades some musicality for a guarantee that no tone's natural harmonic distortion can be mistaken for a different tone. A single high marker tone signals "start"; "end" is a dual-tone chord (low in-band + high above the data band) so a lone tone in the room can't fake it. If your message starts with a known shortened-URL prefix (like is.gd), that prefix is replaced with a single flag byte instead of being transmitted character-by-character. Repeats are merged by majority vote, so one punched-through pass can still yield a clean decode.</p>
       </details>
     </section>
 
@@ -297,9 +297,9 @@
   </div>
 
   <footer>
-    Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
+    Prototype with Reed-Solomon FEC + repeat merge — still not a substitute for a venue-grade stack like <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a> when you need production reliability.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:10 UTC · v28 (reset button + ~25% faster symbols)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-05 23:20 UTC · v29 (RS FEC + soft gaps + repeat merge)</div>
   </footer>
 </div>
 
@@ -332,10 +332,9 @@
   const MARKER_END_HIGH = 1800;
   // END is a dual-tone chord (700+1800). Both partials must be present.
 
-  // v28: 100+50=150ms/symbol (was 130+70=200ms). Center-gated decode + first-symbol
-  // lock made this viable; keep post-START settle unchanged — that's AGC, not bitrate.
+  // v29: 100+65=165ms/symbol — slightly more gap for babble/echo; settle unchanged.
   const SYMBOL_MS  = 100;   // tone duration per nibble
-  const GAP_MS     = 50;    // silence between symbols for room echo/reverb decay
+  const GAP_MS     = 65;    // silence between symbols for room echo / speech collisions
   const MARKER_MS  = 260;   // marker hold — long enough to lock
   const MARKER_GAP_MS = 80; // silence after END marker
   // Extra silence after START only. Phones often still run hardware/OS AGC even when
@@ -350,11 +349,181 @@
   const MARKER_START_GAIN = 0.11; // ~8dB quieter than data — less AGC kick from START
   const MARKER_END_GAIN_EACH = 0.14; // per partial; two together ≈ data loudness without clipping
 
+  // Reed-Solomon parity bytes appended to [prefixId][length][payload].
+  // 8 parity → correct up to 4 byte errors, or 8 byte erasures (mute windows).
+  const RS_NSYM = 8;
+  const MAX_PAYLOAD = 60;
+  const MAX_FRAME_BYTES = 2 + MAX_PAYLOAD + RS_NSYM; // 70
+  const MAX_FRAME_NIBBLES = MAX_FRAME_BYTES * 2;
+
   // Known URL prefixes that get replaced with a single flag byte instead of
   // being transmitted character-by-character. is.gd links all share the same
   // "https://is.gd/" prefix, so stripping it turns a ~20-character shortened
   // URL into effectively just its 6-character code over the air.
   const KNOWN_PREFIXES = ["", "https://is.gd/", "http://is.gd/"];
+
+  const gf_exp = new Uint8Array(512);
+  const gf_log = new Uint8Array(256);
+  const field_charac = 255;
+  (function(){
+    let x = 1;
+    for (let i = 0; i < 255; i++){ gf_exp[i] = x; gf_log[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11d; }
+    for (let i = 255; i < 512; i++) gf_exp[i] = gf_exp[i - 255];
+  })();
+  function gf_mul(x,y){ return (x && y) ? gf_exp[gf_log[x] + gf_log[y]] : 0; }
+  function gf_div(x,y){ if (!y) throw new Error("gfdiv0"); if (!x) return 0; return gf_exp[(gf_log[x] + 255 - gf_log[y]) % 255]; }
+  function gf_pow(x, power){
+    if (power === 0) return 1;
+    if (!x) return 0;
+    return gf_exp[(gf_log[x] * ((power % 255) + 255) % 255) % 255];
+  }
+  function gf_inverse(x){ return gf_exp[255 - gf_log[x]]; }
+  function gf_poly_scale(p,x){ return p.map(c => gf_mul(c,x)); }
+  function gf_poly_add(p,q){
+    const r = new Array(Math.max(p.length, q.length)).fill(0);
+    for (let i = 0; i < p.length; i++) r[i + r.length - p.length] ^= p[i];
+    for (let i = 0; i < q.length; i++) r[i + r.length - q.length] ^= q[i];
+    return r;
+  }
+  function gf_poly_mul(p,q){
+    const r = new Array(p.length + q.length - 1).fill(0);
+    for (let j = 0; j < q.length; j++){
+      if (!q[j]) continue;
+      const lq = gf_log[q[j]];
+      for (let i = 0; i < p.length; i++){
+        if (!p[i]) continue;
+        r[i + j] ^= gf_exp[gf_log[p[i]] + lq];
+      }
+    }
+    return r;
+  }
+  function gf_poly_eval(poly, x){
+    let y = poly[0];
+    for (let i = 1; i < poly.length; i++) y = gf_mul(y, x) ^ poly[i];
+    return y;
+  }
+  function inverted(msg){ return msg.slice().reverse(); }
+
+  function rs_generator_poly(nsym){
+    let g = [1];
+    for (let i = 0; i < nsym; i++) g = gf_poly_mul(g, [1, gf_pow(2, i)]);
+    return g;
+  }
+  function rsEncode(data, nsym){
+    const msg_in = Array.from(data);
+    const gen = rs_generator_poly(nsym);
+    const out = msg_in.concat(new Array(nsym).fill(0));
+    for (let i = 0; i < msg_in.length; i++){
+      const coef = out[i];
+      if (!coef) continue;
+      const lcoef = gf_log[coef];
+      for (let j = 1; j < gen.length; j++) out[i + j] ^= gf_exp[lcoef + gf_log[gen[j]]];
+    }
+    return Uint8Array.from(msg_in.concat(out.slice(msg_in.length)));
+  }
+  function rs_calc_syndromes(msg, nsym){
+    return [0].concat(Array.from({length: nsym}, (_, i) => gf_poly_eval(msg, gf_pow(2, i))));
+  }
+  function rs_find_errata_locator(e_pos){
+    let e_loc = [1];
+    for (const i of e_pos) e_loc = gf_poly_mul(e_loc, gf_poly_add([1], [gf_pow(2, i), 0]));
+    return e_loc;
+  }
+  function rs_find_error_evaluator(synd, err_loc, nsym){
+    const remainder = gf_poly_mul(synd, err_loc);
+    return remainder.slice(remainder.length - (nsym + 1));
+  }
+  function rs_correct_errata(msg_in, synd, err_pos){
+    const msg = msg_in.slice();
+    const coef_pos = err_pos.map(p => msg.length - 1 - p);
+    const err_loc = rs_find_errata_locator(coef_pos);
+    const err_eval = inverted(rs_find_error_evaluator(inverted(synd), err_loc, err_loc.length - 1));
+    const X = coef_pos.map(i => gf_pow(2, -(field_charac - i)));
+    const E = new Array(msg.length).fill(0);
+    for (let i = 0; i < X.length; i++){
+      const Xi = X[i], Xi_inv = gf_inverse(Xi);
+      let err_loc_prime = 1;
+      for (let j = 0; j < X.length; j++){
+        if (j !== i) err_loc_prime = gf_mul(err_loc_prime, 1 ^ gf_mul(Xi_inv, X[j]));
+      }
+      if (!err_loc_prime) return null;
+      let y = gf_poly_eval(inverted(err_eval), Xi_inv);
+      y = gf_mul(Xi, y);
+      E[err_pos[i]] = gf_div(y, err_loc_prime);
+    }
+    return gf_poly_add(msg, E);
+  }
+  function rs_find_error_locator(synd, nsym, erase_count = 0){
+    let err_loc = [1], old_loc = [1];
+    const synd_shift = Math.max(0, synd.length - nsym);
+    for (let i = 0; i < nsym - erase_count; i++){
+      const K = i + synd_shift; // forney path: do not add erase_count to K
+      let delta = synd[K];
+      for (let j = 1; j < err_loc.length; j++)
+        delta ^= gf_mul(err_loc[err_loc.length - (j + 1)], synd[K - j]);
+      old_loc = old_loc.concat([0]);
+      if (delta !== 0){
+        if (old_loc.length > err_loc.length){
+          const new_loc = gf_poly_scale(old_loc, delta);
+          old_loc = gf_poly_scale(err_loc, gf_inverse(delta));
+          err_loc = new_loc;
+        }
+        err_loc = gf_poly_add(err_loc, gf_poly_scale(old_loc, delta));
+      }
+    }
+    let idx = 0; while (idx < err_loc.length && err_loc[idx] === 0) idx++;
+    err_loc = err_loc.slice(idx);
+    const errs = err_loc.length - 1;
+    if ((errs - erase_count) * 2 + erase_count > nsym) return null;
+    return err_loc;
+  }
+  function rs_find_errors(err_loc, nmess){
+    const errs = err_loc.length - 1;
+    const err_pos = [];
+    for (let i = 0; i < nmess; i++)
+      if (gf_poly_eval(err_loc, gf_pow(2, i)) === 0) err_pos.push(nmess - 1 - i);
+    if (err_pos.length !== errs) return null;
+    return err_pos;
+  }
+  function rs_forney_syndromes(synd, pos, nmess){
+    const fsynd = synd.slice(1);
+    for (let i = 0; i < pos.length; i++){
+      const x = gf_pow(2, nmess - 1 - pos[i]);
+      for (let j = 0; j < fsynd.length - 1; j++) fsynd[j] = gf_mul(fsynd[j], x) ^ fsynd[j + 1];
+    }
+    return fsynd;
+  }
+  function rsDecode(codeword, nsym, erasePos = []){
+    try{
+      const msg_out = Array.from(codeword);
+      erasePos = [...new Set(erasePos)].filter(p => p >= 0 && p < msg_out.length);
+      if (erasePos.length > nsym) return null;
+      for (const p of erasePos) msg_out[p] = 0;
+      let synd = rs_calc_syndromes(msg_out, nsym);
+      if (Math.max(...synd) === 0) return Uint8Array.from(msg_out.slice(0, msg_out.length - nsym));
+      let err_pos = [];
+      if (erasePos.length < nsym){
+        const fsynd = rs_forney_syndromes(synd, erasePos, msg_out.length);
+        // If only erasures remain, BM is unnecessary (trailing forney junk may be nonzero).
+        const useful = fsynd.slice(0, Math.max(0, fsynd.length - erasePos.length));
+        if (useful.length && Math.max(...useful) !== 0){
+          const err_loc = rs_find_error_locator(fsynd, nsym, erasePos.length);
+          if (!err_loc) return null;
+          err_pos = rs_find_errors(inverted(err_loc), msg_out.length);
+          if (!err_pos) return null;
+        }
+      }
+      const allPos = [...new Set(erasePos.concat(err_pos))];
+      if (allPos.length > nsym) return null;
+      const corrected = rs_correct_errata(msg_out, synd, allPos);
+      if (!corrected) return null;
+      synd = rs_calc_syndromes(corrected, nsym);
+      if (Math.max(...synd) > 0) return null;
+      return Uint8Array.from(corrected.slice(0, corrected.length - nsym));
+    } catch (e){
+      return null;
+    }
+  }
 
   function textToFrame(text){
     let prefixId = 0;
@@ -363,15 +532,12 @@
       if (text.startsWith(KNOWN_PREFIXES[i])){ prefixId = i; rest = text.slice(KNOWN_PREFIXES[i].length); break; }
     }
     const payload = new TextEncoder().encode(rest);
-    if (payload.length > 60) throw new Error("Message too long");
-    let checksum = 0;
-    for (const b of payload) checksum = (checksum + b) & 0xFF;
-    const frame = new Uint8Array(payload.length + 3);
-    frame[0] = prefixId;
-    frame[1] = payload.length;
-    frame.set(payload, 2);
-    frame[frame.length - 1] = checksum;
-    return frame;
+    if (payload.length > MAX_PAYLOAD) throw new Error("Message too long");
+    const msg = new Uint8Array(2 + payload.length);
+    msg[0] = prefixId;
+    msg[1] = payload.length;
+    msg.set(payload, 2);
+    return rsEncode(msg, RS_NSYM); // [prefix][length][payload][parity…]
   }
 
   function bytesToNibbles(bytes){
@@ -380,13 +546,73 @@
     return out;
   }
 
-  function nibblesToBytes(nibbles){
-    const out = new Uint8Array(nibbles.length / 2);
-    for (let i = 0; i < out.length; i++){
-      out[i] = (nibbles[i*2] << 4) | nibbles[i*2+1];
+  // nibbles: array of 0..15 or null (erasure). Returns {prefixId,payload} or null.
+  function tryDecodeNibbles(nibbles){
+    const nBytes = Math.floor(nibbles.length / 2);
+    if (nBytes < 2 + RS_NSYM) return null;
+    const bytes = new Uint8Array(nBytes);
+    const erasures = [];
+    for (let i = 0; i < nBytes; i++){
+      const hi = nibbles[i * 2], lo = nibbles[i * 2 + 1];
+      if (hi == null || lo == null){ bytes[i] = 0; erasures.push(i); }
+      else bytes[i] = ((hi & 0xF) << 4) | (lo & 0xF);
     }
-    return out;
+    function attempt(msgLen){
+      const total = 2 + msgLen + RS_NSYM;
+      if (total > nBytes) return null;
+      const block = bytes.slice(0, total);
+      const erase = erasures.filter(p => p < total);
+      if (erase.length > RS_NSYM) return null;
+      const decoded = rsDecode(block, RS_NSYM, erase);
+      if (!decoded || decoded.length !== 2 + msgLen) return null;
+      if (decoded[0] > 2) return null;
+      if (decoded[1] !== msgLen) return null;
+      return { prefixId: decoded[0], payload: decoded.slice(2, 2 + msgLen) };
+    }
+    if (!erasures.includes(1)){
+      const msgLen = bytes[1];
+      if (msgLen <= MAX_PAYLOAD){
+        const r = attempt(msgLen);
+        if (r) return r;
+      }
+    }
+    for (let msgLen = 0; msgLen <= MAX_PAYLOAD; msgLen++){
+      if (2 + msgLen + RS_NSYM > nBytes) break;
+      const r = attempt(msgLen);
+      if (r) return r;
+    }
+    return null;
   }
+
+  // Cross-repeat assembly: majority vote per nibble index (db as tie-break).
+  let listenAssembly = null; // { votes: Array<Array<{nib,db}>>, attempts: number }
+  function clearListenAssembly(){ listenAssembly = null; }
+  function recordAssembly(nibbles, dbs){
+    if (!listenAssembly) listenAssembly = { votes: [], attempts: 0 };
+    listenAssembly.attempts++;
+    for (let i = 0; i < nibbles.length; i++){
+      if (!listenAssembly.votes[i]) listenAssembly.votes[i] = [];
+      if (nibbles[i] != null) listenAssembly.votes[i].push({ nib: nibbles[i], db: dbs[i] ?? -Infinity });
+    }
+  }
+  function majorityFromAssembly(){
+    if (!listenAssembly) return [];
+    return listenAssembly.votes.map(votes => {
+      if (!votes || !votes.length) return null;
+      const counts = new Map(), bestDb = new Map();
+      for (const v of votes){
+        counts.set(v.nib, (counts.get(v.nib) || 0) + 1);
+        bestDb.set(v.nib, Math.max(bestDb.get(v.nib) ?? -Infinity, v.db));
+      }
+      let best = null, bestCount = -1, bestD = -Infinity;
+      for (const [nib, c] of counts){
+        const d = bestDb.get(nib);
+        if (c > bestCount || (c === bestCount && d > bestD)){ best = nib; bestCount = c; bestD = d; }
+      }
+      return best;
+    });
+  }
+
 
   function logLine(containerId, text, cls){
     const el = document.getElementById(containerId);
@@ -661,9 +887,10 @@
   let lastSessionPeak = null; // { freq, db, recognized } — loudest thing heard this session
 
   const DETECT_THRESHOLD = -65;
-  const DATA_THRESHOLD = -58; // ignore ghost peaks like -62dB START bleed into 0xF
+  const DATA_THRESHOLD = -60; // slightly more tolerant for crowd babble
   const DATA_LOCK_DB = -55;   // first-symbol clock lock needs a solid tone
-  const DETECT_MARGIN = 6;
+  const DETECT_MARGIN = 6;    // START must clearly beat data tones
+  const DATA_MARGIN = 4;      // nibble classification margin (was 6)
 
   function dbAtFreq(freqDataDb, sampleRate, fftSize, targetFreq){
     const binWidth = sampleRate / fftSize;
@@ -724,7 +951,7 @@
       if (db > bestDb){ secondDb = bestDb; bestDb = db; bestFreq = f; }
       else if (db > secondDb){ secondDb = db; }
     }
-    if (!(bestDb > DATA_THRESHOLD && (bestDb - secondDb) > DETECT_MARGIN)) return null;
+    if (!(bestDb > DATA_THRESHOLD && (bestDb - secondDb) > DATA_MARGIN)) return null;
     // Top data tones sit next to START (1330). Reject when START energy is still
     // competing — that pattern showed up as ghost 0xF reads at ~-62dB after START.
     const startDb = dbAtFreq(freqDataDb, sampleRate, fftSize, MARKER_START);
@@ -822,6 +1049,7 @@
     }
 
     statusEl.textContent = "Requesting microphone access…";
+    clearListenAssembly();
 
     try{
       micStream = await navigator.mediaDevices.getUserMedia({
@@ -879,63 +1107,93 @@
     let currentWindowIdx = 0;
     let windowBest = { freq: null, db: -Infinity };
     let nibbles = [];
+    let nibbleDbs = [];
     let expectedNibbles = null;
     let lastActivity = 0;
     let endLogged = false;
 
     function reset(msg){
       state = "idle"; armedSince = 0; markerOffSince = 0; settleReadyAt = 0;
-      nibbles = []; expectedNibbles = null;
+      nibbles = []; nibbleDbs = []; expectedNibbles = null;
       windowBest = { freq: null, db: -Infinity };
       statusEl.textContent = msg || "Listening for a signal…";
+    }
+
+    function acceptDecoded(now, result, via){
+      const prefix = KNOWN_PREFIXES[result.prefixId] || "";
+      const text = prefix + new TextDecoder().decode(result.payload);
+      renderDecodedResult(resultEl, text);
+      logLine("listenLog", `${relT(now)}  ✓ DECODED${via}: "${text}"`, "hl");
+      saveToHistory(text);
+      clearListenAssembly();
+      state = "done";
+      stopListening();
+      statusEl.textContent = `Received "${text}" — stopped listening.`;
+    }
+
+    function finishAttempt(now){
+      const slice = nibbles.slice(0, expectedNibbles || nibbles.length);
+      const dbSlice = nibbleDbs.slice(0, slice.length);
+      const erasures = slice.filter(n => n == null).length;
+      recordAssembly(slice, dbSlice);
+
+      let result = tryDecodeNibbles(slice);
+      if (result){
+        acceptDecoded(now, result, erasures ? ` (RS fixed ${erasures} erasure(s))` : "");
+        return;
+      }
+
+      const merged = majorityFromAssembly();
+      result = tryDecodeNibbles(merged);
+      if (result){
+        acceptDecoded(now, result, ` (repeat merge · ${listenAssembly.attempts} attempt(s))`);
+        return;
+      }
+
+      statusEl.textContent = "Decode failed — waiting for another repeat…";
+      logLine("listenLog", `${relT(now)}  ✗ frame failed (${erasures} erasure(s)) — kept for merge (${listenAssembly ? listenAssembly.attempts : 0} attempt(s))`, "bad");
+      reset("Listening for next repeat…");
+    }
+
+    function noteSymbol(nibVal, db, now){
+      nibbles.push(nibVal);
+      nibbleDbs.push(db);
+      lastActivity = now;
+      if (nibVal == null){
+        logLine("listenLog", `${relT(now)}    erasure (no symbol) — continuing`, "bad");
+      } else {
+        logLine("listenLog", `${relT(now)}    symbol 0x${nibVal.toString(16).toUpperCase()} ← ${Math.round(DATA_FREQS[nibVal])}Hz (${db.toFixed(0)}dB)`);
+      }
+
+      if (expectedNibbles === null && nibbles.length >= 4){
+        if (nibbles[2] != null && nibbles[3] != null){
+          const lengthByte = (nibbles[2] << 4) | nibbles[3];
+          if (lengthByte > MAX_PAYLOAD){
+            logLine("listenLog", `${relT(now)}  ✗ implausible length byte (${lengthByte}) — aborting`, "bad");
+            reset();
+            return;
+          }
+          expectedNibbles = (lengthByte + 2 + RS_NSYM) * 2;
+        } else {
+          // Header erasure — collect up to max and let RS/merge sort it out.
+          expectedNibbles = MAX_FRAME_NIBBLES;
+          logLine("listenLog", `${relT(now)}    header erasure — reading up to max frame`, "bad");
+        }
+      }
+
+      if (expectedNibbles !== null && nibbles.length >= expectedNibbles){
+        finishAttempt(now);
+      }
     }
 
     function finalizeWindow(){
       const now = performance.now();
       if (windowBest.freq !== null){
         const nibVal = DATA_FREQS.indexOf(windowBest.freq);
-        if (nibVal >= 0){
-          nibbles.push(nibVal);
-          lastActivity = now;
-          logLine("listenLog", `${relT(now)}    symbol 0x${nibVal.toString(16).toUpperCase()} ← ${Math.round(windowBest.freq)}Hz (${windowBest.db.toFixed(0)}dB)`);
-
-          if (expectedNibbles === null && nibbles.length === 4){
-            const lengthByte = (nibbles[2]<<4) | nibbles[3];
-            if (lengthByte > 60){ logLine("listenLog", `${relT(now)}  ✗ implausible length byte (${lengthByte}) — aborting`, "bad"); reset(); return; }
-            expectedNibbles = (lengthByte + 3) * 2; // prefixId + length byte + payload + checksum
-          }
-
-          if (expectedNibbles !== null && nibbles.length >= expectedNibbles){
-            const bytes = nibblesToBytes(nibbles.slice(0, expectedNibbles));
-            const prefixId = bytes[0];
-            const lengthByte = bytes[1];
-            const payload = bytes.slice(2, 2+lengthByte);
-            const checksum = bytes[2+lengthByte];
-            let computed = 0;
-            for (const b of payload) computed = (computed + b) & 0xFF;
-            if (computed === checksum){
-              const prefix = KNOWN_PREFIXES[prefixId] || "";
-              const text = prefix + new TextDecoder().decode(payload);
-              renderDecodedResult(resultEl, text);
-              logLine("listenLog", `${relT(now)}  ✓ DECODED: "${text}"`, "hl");
-              saveToHistory(text);
-              stopListening();
-              statusEl.textContent = `Received "${text}" — stopped listening.`;
-              return;
-            } else {
-              statusEl.textContent = "Checksum mismatch — discarded a garbled read.";
-              logLine("listenLog", `${relT(now)}  ✗ checksum mismatch — discarded`, "bad");
-            }
-            reset();
-            return;
-          }
-        }
+        if (nibVal >= 0) noteSymbol(nibVal, windowBest.db, now);
+        else noteSymbol(null, -Infinity, now);
       } else {
-        // Clock is locked to real data — a mute window means we lost the tone grid.
-        logLine("listenLog", `${relT(now)}    (no symbol recognized this window)`, "bad");
-        logLine("listenLog", `${relT(now)}  ✗ gap in data after ${nibbles.length} symbol(s) — aborting`, "bad");
-        reset(`Gap in data after ${nibbles.length} symbol(s) — listening for a signal…`);
-        return;
+        noteSymbol(null, -Infinity, now);
       }
       windowBest = { freq: null, db: -Infinity };
     }
@@ -1008,6 +1266,7 @@
           currentWindowIdx = 0;
           windowBest = { freq: peak.freq, db: peak.db };
           nibbles = [];
+          nibbleDbs = [];
           expectedNibbles = null;
           lastActivity = now;
           state = "reading";
@@ -1098,6 +1357,7 @@
       document.getElementById("diagRow").style.display = "none";
       lastSessionPeak = null;
     }
+    clearListenAssembly();
 
     const player = document.getElementById("sendPlayer");
     player.pause();
