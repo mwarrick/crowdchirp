@@ -208,9 +208,13 @@
       <p class="sub">Encodes your text into a sequence of tones (a short pentatonic melody, not a harsh chirp) and plays it through your speaker.</p>
 
       <div>
-        <label class="field-label" for="msgInput">MESSAGE (max 20 characters)</label>
-        <input type="text" id="msgInput" maxlength="20" placeholder="e.g. WELCOME2026" value="HELLO">
-        <div class="char-count"><span id="charCount">5</span>/20</div>
+        <label class="field-label" for="msgInput">MESSAGE (max 60 characters)</label>
+        <input type="text" id="msgInput" maxlength="60" placeholder="e.g. https://example.com/promo" value="HELLO">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:5px;">
+          <span id="shortenStatus" style="font-size:11px; color:var(--text-dim); font-family:'IBM Plex Mono',monospace;"></span>
+          <span class="char-count" style="margin-top:0;"><span id="charCount">5</span>/60</span>
+        </div>
+        <button class="secondary" id="shortenBtn" style="margin-top:8px; width:100%;">🔗 Shorten URL first</button>
       </div>
 
       <div>
@@ -236,7 +240,7 @@
 
       <details class="legend" id="senderDetails">
         <summary>How the encoding works</summary>
-        <p>Your text is converted to bytes, wrapped with a length header and a checksum, then split into 4-bit chunks. Each chunk becomes one of 16 tones drawn from a musical scale (so sequences land as a little melody, not random beeps). A high marker tone signals "start", a different high tone signals "end" — kept well clear of typical phone-mic low-frequency roll-off. Repeats give listeners in a noisy room more chances to catch a clean pass.</p>
+        <p>Your text is converted to bytes, wrapped with a length header and a checksum, then split into 4-bit chunks. Each chunk becomes one of 16 tones drawn from a musical scale (so sequences land as a little melody, not random beeps). A high marker tone signals "start", a different high tone signals "end" — kept well clear of typical phone-mic low-frequency roll-off. If your message starts with a known shortened-URL prefix (like is.gd), that prefix is replaced with a single flag byte instead of being transmitted character-by-character — a shortened link effectively costs just its code, not the whole domain. Repeats give listeners in a noisy room more chances to catch a clean pass.</p>
       </details>
     </section>
 
@@ -282,7 +286,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 00:20 UTC · v11 (live transmission logs)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 01:35 UTC · v15 (prefix stripping)</div>
   </footer>
 </div>
 
@@ -307,14 +311,26 @@
   const MARKER_GAP_MS = 60;
   const REPEAT_GAP_MS = 500;
 
+  // Known URL prefixes that get replaced with a single flag byte instead of
+  // being transmitted character-by-character. is.gd links all share the same
+  // "https://is.gd/" prefix, so stripping it turns a ~20-character shortened
+  // URL into effectively just its 6-character code over the air.
+  const KNOWN_PREFIXES = ["", "https://is.gd/", "http://is.gd/"];
+
   function textToFrame(text){
-    const payload = new TextEncoder().encode(text);
-    if (payload.length > 40) throw new Error("Message too long");
+    let prefixId = 0;
+    let rest = text;
+    for (let i = 1; i < KNOWN_PREFIXES.length; i++){
+      if (text.startsWith(KNOWN_PREFIXES[i])){ prefixId = i; rest = text.slice(KNOWN_PREFIXES[i].length); break; }
+    }
+    const payload = new TextEncoder().encode(rest);
+    if (payload.length > 60) throw new Error("Message too long");
     let checksum = 0;
     for (const b of payload) checksum = (checksum + b) & 0xFF;
-    const frame = new Uint8Array(payload.length + 2);
-    frame[0] = payload.length;
-    frame.set(payload, 1);
+    const frame = new Uint8Array(payload.length + 3);
+    frame[0] = prefixId;
+    frame[1] = payload.length;
+    frame.set(payload, 2);
     frame[frame.length - 1] = checksum;
     return frame;
   }
@@ -694,26 +710,30 @@
           lastActivity = now;
           logLine("listenLog", `${relT(now)}    symbol 0x${nibVal.toString(16).toUpperCase()} ← ${Math.round(windowBest.freq)}Hz (${windowBest.db.toFixed(0)}dB)`);
 
-          if (expectedNibbles === null && nibbles.length === 2){
-            const lengthByte = (nibbles[0]<<4) | nibbles[1];
-            if (lengthByte > 40){ logLine("listenLog", `${relT(now)}  ✗ implausible length byte (${lengthByte}) — aborting`, "bad"); reset(); return; }
-            expectedNibbles = (lengthByte + 2) * 2; // length byte + payload + checksum
+          if (expectedNibbles === null && nibbles.length === 4){
+            const lengthByte = (nibbles[2]<<4) | nibbles[3];
+            if (lengthByte > 60){ logLine("listenLog", `${relT(now)}  ✗ implausible length byte (${lengthByte}) — aborting`, "bad"); reset(); return; }
+            expectedNibbles = (lengthByte + 3) * 2; // prefixId + length byte + payload + checksum
           }
 
           if (expectedNibbles !== null && nibbles.length >= expectedNibbles){
             const bytes = nibblesToBytes(nibbles.slice(0, expectedNibbles));
-            const lengthByte = bytes[0];
-            const payload = bytes.slice(1, 1+lengthByte);
-            const checksum = bytes[1+lengthByte];
+            const prefixId = bytes[0];
+            const lengthByte = bytes[1];
+            const payload = bytes.slice(2, 2+lengthByte);
+            const checksum = bytes[2+lengthByte];
             let computed = 0;
             for (const b of payload) computed = (computed + b) & 0xFF;
             if (computed === checksum){
-              const text = new TextDecoder().decode(payload);
+              const prefix = KNOWN_PREFIXES[prefixId] || "";
+              const text = prefix + new TextDecoder().decode(payload);
               resultEl.textContent = text;
               resultEl.classList.remove("empty");
-              statusEl.textContent = "Received! Listening for the next signal…";
               logLine("listenLog", `${relT(now)}  ✓ DECODED: "${text}"`, "hl");
               saveToHistory(text);
+              stopListening();
+              statusEl.textContent = `Received "${text}" — stopped listening.`;
+              return;
             } else {
               statusEl.textContent = "Checksum mismatch — discarded a garbled read.";
               logLine("listenLog", `${relT(now)}  ✗ checksum mismatch — discarded`, "bad");
@@ -846,6 +866,39 @@
     document.querySelectorAll(".repeat-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     repeatCount = parseInt(btn.dataset.r, 10);
+  });
+
+  document.getElementById("shortenBtn").addEventListener("click", async () => {
+    const btn = document.getElementById("shortenBtn");
+    const statusEl = document.getElementById("shortenStatus");
+    const value = msgInput.value.trim();
+
+    if (!/^https?:\/\//i.test(value)){
+      statusEl.textContent = "Enter a full URL (starting with http:// or https://) first.";
+      statusEl.style.color = "var(--bad)";
+      return;
+    }
+
+    btn.disabled = true;
+    statusEl.style.color = "var(--muted)";
+    statusEl.textContent = "Shortening…";
+
+    try{
+      const resp = await fetch("/api/shorten?url=" + encodeURIComponent(value));
+      const data = await resp.json();
+      if (!resp.ok || !data.short){
+        throw new Error(data.error || "Shortening failed.");
+      }
+      msgInput.value = data.short;
+      charCount.textContent = data.short.length;
+      statusEl.style.color = "var(--teal)";
+      statusEl.textContent = `Shortened to ${data.short.length} characters.`;
+    } catch(err){
+      statusEl.style.color = "var(--bad)";
+      statusEl.textContent = err.message;
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   document.getElementById("broadcastBtn").addEventListener("click", () => {
