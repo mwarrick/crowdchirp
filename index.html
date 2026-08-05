@@ -296,7 +296,7 @@
   <footer>
     Proof-of-concept only — a real product should add proper error-correction (e.g. via <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a>) before relying on it across a loud venue.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 04:00 UTC · v22 (shorten-URL UI hidden)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 04:20 UTC · v23 (longer inter-symbol gap for room echo)</div>
   </footer>
 </div>
 
@@ -326,9 +326,9 @@
   const MARKER_START = ALL_TONES[17];              // 1330Hz — high extreme
 
   const SYMBOL_MS  = 130;   // tone duration per nibble
-  const GAP_MS     = 20;    // silence between symbols (helps edge detection)
+  const GAP_MS     = 70;    // silence between symbols — long enough for typical room echo/reverb to decay before the next tone is judged
   const MARKER_MS  = 350;   // marker tones held longer for reliable lock
-  const MARKER_GAP_MS = 60;
+  const MARKER_GAP_MS = 90;
   const REPEAT_GAP_MS = 500;
 
   // Known URL prefixes that get replaced with a single flag byte instead of
