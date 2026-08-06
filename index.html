@@ -198,10 +198,10 @@
       <p class="sub">Encodes your text using ggwave and plays it through your speaker.</p>
 
       <div>
-        <label class="field-label" for="msgInput">MESSAGE (max 60 characters)</label>
-        <input type="text" id="msgInput" maxlength="60" placeholder="e.g. https://example.com/promo" value="https://warrickai.com">
+        <label class="field-label" for="msgInput">MESSAGE (max 200 characters)</label>
+        <input type="text" id="msgInput" maxlength="200" placeholder="e.g. https://example.com/promo" value="https://warrickai.com">
         <div style="display:flex; justify-content:flex-end; align-items:center; margin-top:5px;">
-          <span class="char-count" style="margin-top:0;"><span id="charCount">22</span>/60</span>
+          <span class="char-count" style="margin-top:0;"><span id="charCount">22</span>/200</span>
         </div>
         <!-- Shorten-URL feature temporarily hidden (is.gd proved unreliable) — code kept intact for later reuse -->
         <div id="shortenUI" style="display:none;">
@@ -277,7 +277,7 @@
   <footer>
     Now powered by <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a> — real Reed-Solomon error correction instead of a checksum-only hand-rolled codec.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 05:30 UTC · v25 (restore Tone Cards branding + Reset button)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 05:55 UTC · v32 (raised message limit to 200 chars)</div>
   </footer>
 </div>
 
