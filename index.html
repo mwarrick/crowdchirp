@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Signal — audio data broadcast prototype</title>
+<title>Tone Cards — audio data broadcast prototype</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600;900&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/ggwave@0.4.0/ggwave.js"></script>
@@ -183,7 +183,7 @@
 
   <header>
     <div class="eyebrow">Prototype · data over sound · powered by ggwave</div>
-    <h1>Signal</h1>
+    <h1>Tone Cards</h1>
     <p>Type a short message, broadcast it as encoded audio through your speaker, and decode it back to text on another device listening with its microphone. Now using <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener" style="color:var(--amber);">ggwave</a> — a proven data-over-sound library with real Reed-Solomon error correction — instead of a hand-rolled codec.</p>
   </header>
 
@@ -199,9 +199,9 @@
 
       <div>
         <label class="field-label" for="msgInput">MESSAGE (max 60 characters)</label>
-        <input type="text" id="msgInput" maxlength="60" placeholder="e.g. https://example.com/promo" value="HELLO">
+        <input type="text" id="msgInput" maxlength="60" placeholder="e.g. https://example.com/promo" value="https://warrickai.com">
         <div style="display:flex; justify-content:flex-end; align-items:center; margin-top:5px;">
-          <span class="char-count" style="margin-top:0;"><span id="charCount">5</span>/60</span>
+          <span class="char-count" style="margin-top:0;"><span id="charCount">22</span>/60</span>
         </div>
         <!-- Shorten-URL feature temporarily hidden (is.gd proved unreliable) — code kept intact for later reuse -->
         <div id="shortenUI" style="display:none;">
@@ -213,8 +213,8 @@
       <div>
         <label class="field-label">REPEAT COUNT</label>
         <div class="repeat-row" id="repeatRow">
-          <button class="repeat-btn" data-r="1">Once</button>
-          <button class="repeat-btn active" data-r="3">3×</button>
+          <button class="repeat-btn active" data-r="1">Once</button>
+          <button class="repeat-btn" data-r="3">3×</button>
           <button class="repeat-btn" data-r="5">5×</button>
           <button class="repeat-btn" data-r="10">10×</button>
         </div>
@@ -230,6 +230,7 @@
       <div class="status-row"><div class="dot" id="sendDot"></div><span id="sendStatus">Ready to broadcast.</span></div>
 
       <button class="primary" id="broadcastBtn">▶ Broadcast</button>
+      <button class="secondary" id="resetSendBtn" style="width:100%;">↺ Reset</button>
 
       <details class="legend">
         <summary>How the encoding works</summary>
@@ -276,7 +277,7 @@
   <footer>
     Now powered by <a href="https://github.com/ggerganov/ggwave" target="_blank" rel="noopener">ggwave</a> — real Reed-Solomon error correction instead of a checksum-only hand-rolled codec.<br>
     If the mic won't start in this preview, your browser is likely blocking microphone access inside the embedded frame — try opening this file directly in a browser tab.
-    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 05:10 UTC · v24 (real ggwave integration, Reed-Solomon FEC)</div>
+    <div style="margin-top:10px; color:var(--teal); font-weight:600;">Build: 2026-08-06 05:30 UTC · v25 (restore Tone Cards branding + Reset button)</div>
   </footer>
 </div>
 
@@ -696,13 +697,27 @@
   const charCount = document.getElementById("charCount");
   msgInput.addEventListener("input", () => { charCount.textContent = msgInput.value.length; });
 
-  let repeatCount = 3;
+  let repeatCount = 1;
   document.getElementById("repeatRow").addEventListener("click", (e) => {
     const btn = e.target.closest(".repeat-btn");
     if (!btn) return;
     document.querySelectorAll(".repeat-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     repeatCount = parseInt(btn.dataset.r, 10);
+  });
+
+  document.getElementById("resetSendBtn").addEventListener("click", () => {
+    if (isBroadcasting) stopBroadcast();
+    msgInput.value = "https://warrickai.com";
+    charCount.textContent = msgInput.value.length;
+    document.querySelectorAll("#repeatRow .repeat-btn").forEach(b => b.classList.remove("active"));
+    document.querySelector('#repeatRow .repeat-btn[data-r="1"]').classList.add("active");
+    repeatCount = 1;
+    document.getElementById("sendLog").innerHTML = "";
+    document.getElementById("sendStatus").textContent = "Ready to broadcast.";
+    document.getElementById("sendDot").classList.remove("on");
+    const ctx2d = sendScopeEl.getContext("2d");
+    ctx2d.clearRect(0, 0, sendScopeEl.width, sendScopeEl.height);
   });
 
   document.getElementById("broadcastBtn").addEventListener("click", () => {
